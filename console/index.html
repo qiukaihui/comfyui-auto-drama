@@ -733,6 +733,8 @@ let scriptBefore = null;   // 改写前剧本
 let scriptAfter = null;    // 改写后剧本（当前生效）
 let currentScript = null;  // 当前使用的剧本（确认后）
 let promptTasks = [];      // 规范提示词任务列表
+let expandRunning = false; // AI 扩写任务是否在跑（用于全局忙碌拦截）
+let pasteBusy = false;     // 导入/转换剧本是否在跑（防重复点击产生并发转换）
 let pollTimer = null;
 let savedProject = null;
 let currentProjectName = '';
@@ -943,6 +945,8 @@ function renderScriptTable(script) {
 }
 
 async function generateScript() {
+  const busy = await busyReason();
+  if (busy) { toast(`${busy}，请先等它完成后再生成剧本`, true); return; }
   const topic = $('topicInput').value.trim();
   if (!topic) { toast('请先填写剧情梗概', true); return; }
   const btn = $('btnGenScript');
@@ -976,9 +980,15 @@ function openPasteModal() {
 function closePasteModal() { $('modalBg').style.display = 'none'; }
 
 async function doPaste() {
+  if (pasteBusy) { toast('剧本转换/导入正在进行，请稍候', true); return; }
+  const busy = await busyReason();
+  if (busy) { toast(`${busy}，请先等它完成后再导入`, true); return; }
   const tab = document.querySelector('#modalBg .tab-btn.active').dataset.tab;
   const text = (tab === 'tabFragment' ? $('pasteFragment') : $('pasteBox')).value.trim();
   if (!text) return;
+  pasteBusy = true;
+  const okBtn = $('btnPasteOk');
+  if (okBtn) okBtn.disabled = true;
   try {
     let r;
     if (tab === 'tabFragment') {
@@ -1023,6 +1033,10 @@ async function doPaste() {
     }
     closePasteModal();
   } catch (e) { toast('导入失败：' + e.message, true); }
+  finally {
+    pasteBusy = false;
+    if (okBtn) okBtn.disabled = false;
+  }
 }
 
 // ---------- ③ 改写脚本 ----------
@@ -1154,6 +1168,7 @@ async function buildPrompts() {
       });
       const d = await r.json();
       if (!r.ok) { toast(d.error, true); return; }
+      expandRunning = true;
       pollExpandTask(d.task_id);
       return; // 轮询接管后续
     } else {
@@ -1206,6 +1221,19 @@ function renderPromptCards() {
   </div>`).join('');
 }
 
+async function busyReason() {
+  // 有进程时返回原因字符串，无进程返回 ''。用于拦截 生成剧本/导入脚本 等可能冲突的操作
+  if (expandRunning) return 'AI 扩写正在进行';
+  try {
+    const server = $('serverInput').value.trim();
+    const r = await fetch(`/api/status?server=${encodeURIComponent(server)}`);
+    const d = await r.json();
+    const active = (d.tasks || []).filter(t => ['queued', 'running', 'waiting'].includes(t.status));
+    if (active.length) return `有 ${active.length} 个任务正在生成/排队`;
+  } catch (e) {}
+  return '';
+}
+
 function pollExpandTask(tid) {
   const btn = $('btnBuildPrompts');
   btn.disabled = true; btn.textContent = '✨ AI 扩写中…';
@@ -1248,6 +1276,7 @@ function pollExpandTask(tid) {
         } catch (e) {}
       } else {
         clearInterval(poll);
+        expandRunning = false;
         toastClear();
         $('promptProgress').style.display = 'none';
         btn.disabled = false; btn.textContent = '✨ 生成 H3 规范提示词';
@@ -1264,6 +1293,7 @@ function pollExpandTask(tid) {
       }
     } catch (e) {
       clearInterval(poll);
+      expandRunning = false;
       toastClear();
       btn.disabled = false; btn.textContent = '✨ 生成 H3 规范提示词';
       toast('进度查询失败：' + e.message, true);
@@ -1277,6 +1307,7 @@ async function resumeExpand() {
     const d = await r.json();
     if (d.active && (d.status === 'running' || d.status === 'queued')) {
       toast(`检测到未完成的扩写任务（${d.done}/${d.total} 段），自动恢复显示…`);
+      expandRunning = true;
       goStep(4);
       pollExpandTask(d.task_id);
     }
