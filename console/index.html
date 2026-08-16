@@ -374,6 +374,7 @@
       <div class="row" style="align-items:center;margin:16px 0 10px">
         <h3 style="font-size:14px;margin:0">🎬 分镜图（每段故事板）</h3>
         <span style="flex:1"></span>
+        <button class="btn" style="padding:3px 10px;font-size:11px" onclick="genStoryboards()">⚡ 一键生成分镜图</button>
         <button class="btn" style="padding:3px 10px;font-size:11px;color:var(--red)" onclick="clearAssetsByKind('story')">🧹 清空分镜图</button>
       </div>
       <label style="font-size:12px;color:var(--muted);margin-bottom:10px;display:inline-block">
@@ -2722,6 +2723,12 @@ async function genAllAssets() {
   });
   const total = items.length;
   if (!total) { toast('没有可生成的资产', true); return; }
+  startAssetsBatch(items);
+}
+
+async function startAssetsBatch(items) {
+  const total = items.length;
+  if (!total) { toast('没有可生成的资产', true); return; }
   toastLoading(`⚡ 服务端批量生成中（共 ${total} 张，刷新页面不中断）…`);
   $('assetProgress').style.display = '';
   $('assetBar').style.width = '0%';
@@ -2733,6 +2740,23 @@ async function genAllAssets() {
     if (!r.ok) { toast(d.error || '启动失败', true); return; }
     pollAssetsTask(d.task_id);
   } catch (e) { $('assetProgress').style.display = 'none'; toast('启动失败：' + e.message, true); }
+}
+
+function genStoryboards() {
+  if (!currentScript) { toast('请先生成剧本', true); return; }
+  const sb = currentScript.storyboard_list || [];
+  const items = [];
+  sb.forEach((s, i) => {
+    if (assetImgs.story[i]) return;
+    const prompt = defaultStoryPrompt(i);
+    items.push({
+      kind: 'story', key: i, prompt, view: null,
+      expected: {look: prompt.slice(0, 160), people_count: Math.max((s.roles || []).length, 1)},
+      label: `分镜 ${i + 1}`,
+    });
+  });
+  if (!items.length) { toast('分镜图已全部生成', true); return; }
+  startAssetsBatch(items);
 }
 
 let assetsGenRunning = false;  // 服务端批量生图任务是否在跑（用于忙碌拦截/刷新恢复）
