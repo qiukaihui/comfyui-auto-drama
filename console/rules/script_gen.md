@@ -7,7 +7,7 @@
   "title": "剧名",
   "logline": "一句话梗概",
   "role_list": [
-    {"role_name": "角色名", "role_desc": "外貌/服装/性格，一句话"}
+    {"role_name": "角色名", "role_desc": "性别（男/女）必须写明，+ 外貌/服装/性格，一句话"}
   ],
   "storyboard_list": [
     {
