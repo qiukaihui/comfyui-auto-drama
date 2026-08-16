@@ -2771,7 +2771,8 @@ function pollAssetsTask(tid) {
       if (d.status === 'running' || d.status === 'queued') {
         const total = d.total || 1, done = d.done || 0;
         $('assetBar').style.width = `${Math.round(done / total * 100)}%`;
-        $('assetProgressText').textContent = `已生成 ${done}/${total} 张 · ${d.current || ''}`;
+        const fails = (d.failed || []).map(f => f.label).join('、');
+        $('assetProgressText').textContent = `已生成 ${done}/${total} 张 · ${d.current || ''}${fails ? ` · 失败：${fails}` : ''}`;
       } else {
         clearInterval(poll);
         assetsGenRunning = false;
@@ -2779,7 +2780,10 @@ function pollAssetsTask(tid) {
         if (d.status === 'done') {
           await loadProject();  // 同步服务端已生成的资产
           renderAssets();
-          toast(`✅ 一键生成完成（共 ${d.done || 0} 张）`);
+          const fails = (d.failed || []).map(f => f.label).join('、');
+          toast(fails
+            ? `✅ 生成 ${d.done || 0} 张；失败 ${(d.failed || []).length} 段：${fails}（质检未通过，可点卡片重新生成）`
+            : `✅ 一键生成完成（共 ${d.done || 0} 张）`);
         } else {
           toast('一键生成失败：' + (d.error || '未知错误'), true);
           renderAssets();

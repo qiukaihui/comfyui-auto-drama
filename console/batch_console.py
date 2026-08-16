@@ -3033,7 +3033,7 @@ def _register_asset(kind, key, filename, view=None, meta=None):
 def start_assets_batch_job(items):
     """服务端后台批量生图任务（每张立即保存，前端轮询进度，刷新页面可恢复）。"""
     tid = "assets_" + uuid.uuid4().hex[:10]
-    job = {"status": "queued", "done": 0, "total": len(items), "current": "", "error": None}
+    job = {"status": "queued", "done": 0, "total": len(items), "current": "", "error": None, "failed": []}
     with ASSET_JOBS_LOCK:
         ASSET_JOBS[tid] = job
     st = load_state()
@@ -3057,6 +3057,7 @@ def start_assets_batch_job(items):
                 except Exception as e:
                     print(f"[assets] {label} 失败：{e}", flush=True)
                     job["error"] = f"{label} 失败：{e}"
+                    job["failed"].append({"label": label, "error": str(e)[:160]})
                 job["done"] = i + 1
             job["status"] = "done"
         except Exception as e:
@@ -4083,7 +4084,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._send(200, json.dumps({
                 "status": job["status"], "done": job["done"], "total": job["total"],
-                "current": job["current"], "error": job["error"],
+                "current": job["current"], "error": job["error"], "failed": job.get("failed", []),
             }, ensure_ascii=False))
             return
         if path.path == "/api/assets_gen_current":
@@ -4101,7 +4102,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, json.dumps({
                 "active": True, "task_id": et["task_id"],
                 "status": job["status"], "done": job["done"], "total": job["total"],
-                "current": job["current"], "error": job["error"],
+                "current": job["current"], "error": job["error"], "failed": job.get("failed", []),
             }, ensure_ascii=False))
             return
         self._send(404, "not found", "text/plain; charset=utf-8")
