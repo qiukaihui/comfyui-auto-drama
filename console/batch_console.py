@@ -2932,7 +2932,8 @@ def verify_asset(image_path, kind, expected=None, timeout=120):
         people_line = (
             f" 0. 画面里必须严格只有 {people} 个人（计数铁律：背景人物、画面边缘半身人、"
             "被遮挡的人、镜像/倒影人物都算人，必须全部计入，总数必须恰好为 "
-            f"{people}，多一个即不通过）；绝对没有第三人、没有多余的肢体/手臂/手伸入画面"
+            f"{people}，多一个即不通过）；如果无法明确清点人数，ok 必须为 false；"
+            "绝对没有第三人、没有多余的肢体/手臂/手伸入画面"
             if people else ""
         )
         q = (f"你是图片质检员。检查这张分镜图，严格只输出 JSON：{{\"ok\": true或false, \"issues\": [...]}}\n"
@@ -2942,14 +2943,21 @@ def verify_asset(image_path, kind, expected=None, timeout=120):
     try:
         content = vision_ask(image_path, q, timeout)
     except Exception as e:
-        return {"ok": True, "issues": [], "error": f"质检服务不可用：{e}"}
+        # 质检服务不可用 → 无法确认 → 判不通过（fail-closed，避免坏图被静默放行）
+        return {"ok": False, "issues": [f"质检服务不可用：{e}"], "error": str(e)}
     data = _extract_json_obj(content) or {}
     if not data:
-        return {"ok": True, "issues": [], "error": "质检返回无法解析（保守放行）"}
+        # 模型没吐出标准 JSON → 无法确认 → 判不通过
+        return {"ok": False, "issues": ["质检模型未返回可解析结果，判定不通过"], "error": "unparsable"}
+    ok_raw = data.get("ok")
+    if isinstance(ok_raw, str):
+        ok = ok_raw.strip().lower() in ("true", "1", "yes", "通过")
+    else:
+        ok = bool(ok_raw)
     issues = data.get("issues") or []
     if not isinstance(issues, list):
         issues = [issues]
-    return {"ok": bool(data.get("ok")), "issues": [str(x) for x in issues][:5]}
+    return {"ok": ok, "issues": [str(x) for x in issues][:5]}
 
 
 _ASSET_TAG = {"role": "锚点", "scene": "场景", "story": "分镜"}
@@ -2972,6 +2980,9 @@ def _gen_asset_file(kind, key, prompt, expected=None, view=None):
         if v.get("ok"):
             return fn, True, [], attempts
         time.sleep(1)
+    # 分镜图人数是硬性指标：3 次质检都不过就不再入库，交给上层报错
+    if kind == "story" and not v.get("ok"):
+        raise ValueError(f"质检未通过（3 次）：{'；'.join(last_issues)[:200] or '人数/穿帮异常'}")
     return last_fn, False, last_issues, attempts
 
 
