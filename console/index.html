@@ -1259,6 +1259,7 @@ function renderPromptCards() {
 async function busyReason() {
   // 有进程时返回原因字符串，无进程返回 ''。用于拦截 生成剧本/导入脚本 等可能冲突的操作
   if (expandRunning) return 'AI 扩写正在进行';
+  if (assetsGenRunning) return '参考图生成正在进行';
   try {
     const server = $('serverInput').value.trim();
     const r = await fetch(`/api/status?server=${encodeURIComponent(server)}`);
@@ -2688,8 +2689,9 @@ async function genAllAssets() {
   const sb = (currentScript.storyboard_list || []);
   const fourViews = $('genFourViews') ? $('genFourViews').checked : true;
   const viewZh = {front: '正面', face: '脸部', side: '侧面', back: '背面'};
-  // 收集待生成清单（只生成缺失的，支持断点续跑）
-  const todo = [];
+  // 收集待生成清单（只生成缺失的，支持断点续跑），交给服务端后台批量生成
+  const items = [];
+  const pushItem = (kind, key, prompt, view, expected, label) => items.push({kind, key, prompt, view, expected, label});
   roles.forEach((r, i) => {
     const name = r.role_name || r.name;
     ['front', 'face', 'side', 'back'].forEach(v => {
@@ -2699,52 +2701,87 @@ async function genAllAssets() {
         ? (views.front || assetImgs.role[name])
         : views[v];
       if (has) return;
-      todo.push({label: `角色「${name}」${viewZh[v]}`, fn: () => genRoleViewAsset(i, v)});
+      const gender = (assetImgs.roleGender && assetImgs.roleGender[name]) || inferGender(r.role_desc || '');
+      const prompt = roleViewPrompt(r, gender, v);
+      const st = assetState.roles[name] || {};
+      pushItem('role', name, prompt, v, {
+        gender: gender || '未知', hair: st.hair || '', costume: st.costume || '',
+        look: [st.hair, st.costume].filter(Boolean).join('，') || prompt.slice(0, 120), view: v,
+      }, `角色「${name}」${viewZh[v]}`);
     });
   });
   sceneNames.forEach(sc => {
-    if (!assetImgs.scene[sc]) {
-      todo.push({
-        label: `场景「${sc}」`,
-        fn: async () => {
-          assetImgs.scene[sc] = await genAsset('scene', sc, defaultScenePrompt(sc), '场景');
-          assetState.scenes[sc] = assetState.scenes[sc] || {};
-          assetState.scenes[sc].reference = assetImgs.scene[sc];
-        },
-      });
-    }
+    if (assetImgs.scene[sc]) return;
+    const prompt = defaultScenePrompt(sc);
+    pushItem('scene', sc, prompt, null, {desc: (assetState.scenes[sc] || {}).desc || prompt.slice(0, 140)}, `场景「${sc}」`);
   });
   sb.forEach((s, i) => {
-    if (!assetImgs.story[i]) {
-      todo.push({
-        label: `分镜 ${i + 1}`,
-        fn: async () => {
-          assetImgs.story[i] = await genAsset('story', `s${i + 1}`, defaultStoryPrompt(i), '分镜');
-        },
-      });
-    }
+    if (assetImgs.story[i]) return;
+    const prompt = defaultStoryPrompt(i);
+    pushItem('story', i, prompt, null, {look: prompt.slice(0, 160), people_count: Math.max((s.roles || []).length, 1)}, `分镜 ${i + 1}`);
   });
-  const total = todo.length;
+  const total = items.length;
   if (!total) { toast('没有可生成的资产', true); return; }
-  toastLoading(`⚡ 一键生成中（共 ${total} 张，每张约 10-30 秒）…`);
+  toastLoading(`⚡ 服务端批量生成中（共 ${total} 张，刷新页面不中断）…`);
   $('assetProgress').style.display = '';
   $('assetBar').style.width = '0%';
-  let doneN = 0;
-  const tick = (label) => {
-    doneN++;
-    $('assetBar').style.width = `${Math.round(doneN / total * 100)}%`;
-    $('assetProgressText').textContent = `已生成 ${doneN}/${total} 张 · ${label}`;
-  };
   try {
-    for (const t of todo) {
-      await t.fn();
-      tick(t.label);
+    const r = await fetch('/api/assets_gen_batch', {
+      method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({items}),
+    });
+    const d = await r.json();
+    if (!r.ok) { toast(d.error || '启动失败', true); return; }
+    pollAssetsTask(d.task_id);
+  } catch (e) { $('assetProgress').style.display = 'none'; toast('启动失败：' + e.message, true); }
+}
+
+let assetsGenRunning = false;  // 服务端批量生图任务是否在跑（用于忙碌拦截/刷新恢复）
+
+function pollAssetsTask(tid) {
+  assetsGenRunning = true;
+  $('assetProgress').style.display = '';
+  const poll = setInterval(async () => {
+    try {
+      const r = await fetch(`/api/assets_gen_progress?task_id=${encodeURIComponent(tid)}`);
+      const d = await r.json();
+      if (d.status === 'running' || d.status === 'queued') {
+        const total = d.total || 1, done = d.done || 0;
+        $('assetBar').style.width = `${Math.round(done / total * 100)}%`;
+        $('assetProgressText').textContent = `已生成 ${done}/${total} 张 · ${d.current || ''}`;
+      } else {
+        clearInterval(poll);
+        assetsGenRunning = false;
+        $('assetProgress').style.display = 'none';
+        if (d.status === 'done') {
+          await loadProject();  // 同步服务端已生成的资产
+          renderAssets();
+          toast(`✅ 一键生成完成（共 ${d.done || 0} 张）`);
+        } else {
+          toast('一键生成失败：' + (d.error || '未知错误'), true);
+          renderAssets();
+        }
+      }
+    } catch (e) {
+      clearInterval(poll);
+      assetsGenRunning = false;
+      $('assetProgress').style.display = 'none';
+      toast('进度查询失败：' + e.message, true);
     }
-    renderAssets();
-    autoSaveProject(true);
-    $('assetProgress').style.display = 'none';
-    toast(`✅ 一键生成完成，共 ${total} 张`);
-  } catch (e) { $('assetProgress').style.display = 'none'; toast('一键生成中断：' + e.message, true); renderAssets(); }
+  }, 3000);
+}
+
+async function resumeAssets() {
+  try {
+    const r = await fetch('/api/assets_gen_current');
+    const d = await r.json();
+    if (d.active) {
+      $('assetProgress').style.display = '';
+      $('assetBar').style.width = `${Math.round((d.done || 0) / (d.total || 1) * 100)}%`;
+      $('assetProgressText').textContent = `已生成 ${d.done || 0}/${d.total || 1} 张 · ${d.current || ''}（刷新恢复）`;
+      toast('检测到未完成的参考图生成，自动恢复显示…');
+      pollAssetsTask(d.task_id);
+    }
+  } catch (e) {}
 }
 
 function clearAssets() {
@@ -3004,6 +3041,7 @@ checkConn();
 checkLlm();
 loadConfigIntoForm();
 resumeExpand();
+resumeAssets();
 goStep(1);
 </script>
 </body>

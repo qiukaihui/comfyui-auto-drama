@@ -137,6 +137,8 @@ EXPAND_JOBS = {}
 EXPAND_JOBS_LOCK = threading.Lock()
 ASSEMBLE_JOBS = {}
 ASSEMBLE_JOBS_LOCK = threading.Lock()
+ASSET_JOBS = {}
+ASSET_JOBS_LOCK = threading.Lock()
 
 
 def estimate_timeout(task):
@@ -2795,7 +2797,8 @@ def boogu_generate(prompt, filename, size="768x1024", timeout=300):
 
 def _boogu_local(prompt, filename, size="768x1024", timeout=300):
     """调本地 Boogu-Image 生成图片并保存到 素材/ 目录。返回 (filename, 绝对路径)。"""
-    payload = {"model": "boogu-image", "prompt": prompt, "size": size}
+    # 每次调用带随机 seed：重试/重新生成会得到不同画面（Boogu 未传 seed 时曾固定 42 出同一张图）
+    payload = {"model": "boogu-image", "prompt": prompt, "size": size, "seed": random.randrange(2 ** 31)}
     req = urllib.request.Request(
         BOOGU_URL + "/v1/images/generations",
         data=json.dumps(payload).encode("utf-8"),
@@ -2947,6 +2950,104 @@ def verify_asset(image_path, kind, expected=None, timeout=120):
     if not isinstance(issues, list):
         issues = [issues]
     return {"ok": bool(data.get("ok")), "issues": [str(x) for x in issues][:5]}
+
+
+_ASSET_TAG = {"role": "锚点", "scene": "场景", "story": "分镜"}
+
+
+def _gen_asset_file(kind, key, prompt, expected=None, view=None):
+    """生图 + 质检（最多 3 次，每次随机 seed 出新图）。返回 (filename, verified, issues, attempts)。"""
+    expected = dict(expected or {})
+    if view:
+        expected["view"] = view
+    tag = _ASSET_TAG.get(kind, kind)
+    safe = re.sub(r'[\\/:*?"<>|]', '', str(key))[:20] or "x"
+    last_fn, last_issues, attempts = None, [], 0
+    for _ in range(3):
+        filename = f"{tag}_{safe}_{int(time.time() * 1000):x}_{random.randrange(16 ** 4):04x}.png"
+        fn, dest = boogu_generate(prompt, filename, "768x1024")
+        attempts += 1
+        v = verify_asset(dest, kind, expected)
+        last_fn, last_issues = fn, v.get("issues", [])
+        if v.get("ok"):
+            return fn, True, [], attempts
+        time.sleep(1)
+    return last_fn, False, last_issues, attempts
+
+
+def _register_asset(kind, key, filename, view=None, meta=None):
+    """把生成结果登记进项目状态并立即保存（角色/场景/分镜/四视图）。"""
+    st = load_state()
+    proj = dict(st.get("project") or {})
+    ai = dict(proj.get("asset_imgs") or {})
+    am = dict(proj.get("asset_meta") or {})
+    ast = dict(proj.get("asset_state") or {})
+    if kind == "role":
+        ai.setdefault("role", {})[str(key)] = filename
+        ai.setdefault("roleViews", {}).setdefault(str(key), {})[view or "front"] = filename
+        r = ast.setdefault("roles", {}).setdefault(str(key), {})
+        r.setdefault("views", {})[view or "front"] = filename
+        if not view or view == "front":
+            r["reference"] = filename
+    elif kind == "scene":
+        ai.setdefault("scene", {})[str(key)] = filename
+        ast.setdefault("scenes", {}).setdefault(str(key), {})["reference"] = filename
+    else:
+        ai.setdefault("story", {})[str(key)] = filename
+    am.setdefault(kind, {})[str(key)] = meta or {"verified": False, "issues": [], "attempts": 1}
+    proj["asset_imgs"] = ai
+    proj["asset_meta"] = am
+    proj["asset_state"] = ast
+    st["project"] = proj
+    projects = st.get("projects") or {}
+    if proj.get("name"):
+        snap = dict(proj)
+        snap["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        projects[proj["name"]] = snap
+        st["projects"] = projects
+    save_state(st)
+
+
+def start_assets_batch_job(items):
+    """服务端后台批量生图任务（每张立即保存，前端轮询进度，刷新页面可恢复）。"""
+    tid = "assets_" + uuid.uuid4().hex[:10]
+    job = {"status": "queued", "done": 0, "total": len(items), "current": "", "error": None}
+    with ASSET_JOBS_LOCK:
+        ASSET_JOBS[tid] = job
+    st = load_state()
+    st["assets_gen_task"] = {"task_id": tid, "status": "queued"}
+    save_state(st)
+
+    def work():
+        job["status"] = "running"
+        try:
+            for i, item in enumerate(items):
+                kind = item.get("kind") or "story"
+                key = item.get("key")
+                prompt = str(item.get("prompt") or "").strip()
+                view = item.get("view")
+                expected = item.get("expected") or {}
+                label = item.get("label") or f"{kind} {key}"
+                job["current"] = label
+                try:
+                    fn, ok, issues, attempts = _gen_asset_file(kind, key, prompt, expected, view)
+                    _register_asset(kind, key, fn, view, {"verified": ok, "issues": issues, "attempts": attempts})
+                except Exception as e:
+                    print(f"[assets] {label} 失败：{e}", flush=True)
+                    job["error"] = f"{label} 失败：{e}"
+                job["done"] = i + 1
+            job["status"] = "done"
+        except Exception as e:
+            job["status"] = "error"
+            job["error"] = str(e)
+        finally:
+            job["current"] = ""
+            st = load_state()
+            st.pop("assets_gen_task", None)
+            save_state(st)
+
+    threading.Thread(target=work, daemon=True).start()
+    return tid
 
 
 def llm_expand_storyboards(data, token=""):
@@ -3951,6 +4052,36 @@ class Handler(BaseHTTPRequestHandler):
                 "current": job["current"], "error": job["error"],
             }, ensure_ascii=False))
             return
+        if path.path == "/api/assets_gen_progress":
+            qs = urllib.parse.parse_qs(path.query)
+            tid = qs.get("task_id", [""])[0]
+            job = ASSET_JOBS.get(tid)
+            if not job:
+                self._send(404, json.dumps({"error": "任务不存在"}, ensure_ascii=False))
+                return
+            self._send(200, json.dumps({
+                "status": job["status"], "done": job["done"], "total": job["total"],
+                "current": job["current"], "error": job["error"],
+            }, ensure_ascii=False))
+            return
+        if path.path == "/api/assets_gen_current":
+            st = load_state()
+            et = st.get("assets_gen_task")
+            if not et:
+                self._send(200, json.dumps({"active": False}, ensure_ascii=False))
+                return
+            job = ASSET_JOBS.get(et.get("task_id"))
+            if not job:
+                st.pop("assets_gen_task", None)
+                save_state(st)
+                self._send(200, json.dumps({"active": False, "lost": True}, ensure_ascii=False))
+                return
+            self._send(200, json.dumps({
+                "active": True, "task_id": et["task_id"],
+                "status": job["status"], "done": job["done"], "total": job["total"],
+                "current": job["current"], "error": job["error"],
+            }, ensure_ascii=False))
+            return
         self._send(404, "not found", "text/plain; charset=utf-8")
 
     def do_POST(self):
@@ -3977,6 +4108,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(400, json.dumps({"error": f"Boogu 生图失败：{e}"}, ensure_ascii=False))
                 return
             self._send(200, json.dumps({"filename": fn, "path": dest}, ensure_ascii=False))
+            return
+        if path == "/api/assets_gen_batch":
+            """服务端后台批量生图（一键生成用，前端轮询进度，刷新可恢复）。"""
+            items = body.get("items") or []
+            if not items:
+                self._send(400, json.dumps({"error": "没有待生成资产"}, ensure_ascii=False))
+                return
+            tid = start_assets_batch_job(items)
+            self._send(200, json.dumps({"task_id": tid}, ensure_ascii=False))
             return
         if path == "/api/asset_gen":
             prompt = body.get("prompt", "")

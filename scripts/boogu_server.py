@@ -18,6 +18,7 @@ import base64
 import gc
 import io
 import os
+import random
 import sys
 import threading
 import time
@@ -90,8 +91,9 @@ async def generate(request: Request):
     out = []
     for i in range(n):
         s = (seed + i) if seed is not None else None
+        seed_val = s if s is not None else random.randint(0, 2 ** 31 - 1)  # 未传 seed 时随机，避免每次同一张图
         img = p.generate(prompt, height=h, width=w, steps=steps, guidance=guidance,
-                         seed=s if s is not None else 42)
+                         seed=seed_val)
         buf = io.BytesIO()
         Image.fromarray(img).save(buf, format="PNG")
         out.append({"b64_json": base64.b64encode(buf.getvalue()).decode()})
