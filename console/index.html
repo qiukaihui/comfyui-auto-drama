@@ -345,6 +345,7 @@
         <span id="booguStatus" style="font-size:12px;color:var(--muted)">检测本地生图服务…</span>
         <span style="flex:1"></span>
         <button class="btn" id="btnReverifyAssets">🩺 补质检（已有图）</button>
+        <button class="btn" id="btnClearAssets">🧹 清空已生成图</button>
         <button class="btn green" id="btnGenAllAssets">⚡ 一键生成全部参考图</button>
       </div>
       <label style="font-size:12px;color:var(--muted);margin-top:6px;display:inline-block">
@@ -2734,6 +2735,27 @@ async function genAllAssets() {
   } catch (e) { $('assetProgress').style.display = 'none'; toast('一键生成中断：' + e.message, true); renderAssets(); }
 }
 
+function clearAssets() {
+  askConfirm('确定清空已生成的参考图吗？\n将移除 角色/场景/分镜 的已生成图片引用（文件本身不删），'
+    + '你填写的身份/发型/服装/场景描述保留。清空后点「一键生成」会用最新提示词重新生成。', async () => {
+    // 清图片引用：assetImgs / 状态表 reference+views / 质检记录
+    assetImgs = {role: {}, scene: {}, story: {}};
+    Object.keys(assetState.roles || {}).forEach(n => {
+      delete assetState.roles[n].reference;
+      delete assetState.roles[n].views;
+    });
+    Object.keys(assetState.scenes || {}).forEach(n => {
+      delete assetState.scenes[n].reference;
+    });
+    assetMeta = {role: {}, scene: {}, story: {}};
+    // 分镜提示词也清空：让分镜图用最新模板/规则重新生成（角色/场景提示词保留自定义）
+    assetPrompts = {role: assetPrompts.role || {}, scene: assetPrompts.scene || {}, story: {}};
+    renderAssets();
+    autoSaveProject(true);
+    toast('🧹 已清空，点「⚡ 一键生成全部参考图」用新提示词重新生成');
+  });
+}
+
 async function genRoleViewAsset(i, view) {
   // 一键生成用的角色视图生成（不依赖按钮/弹窗，逐张立即保存）
   const r = (currentScript.role_list || [])[i];
@@ -2912,6 +2934,7 @@ $('llmProvider').addEventListener('change', toggleCfgBoxes);
 $('imgProvider').addEventListener('change', toggleCfgBoxes);
 $('btnGenAllAssets').addEventListener('click', genAllAssets);
 $('btnReverifyAssets').addEventListener('click', reverifyAssets);
+$('btnClearAssets').addEventListener('click', clearAssets);
 $('btnUploadVideo').addEventListener('click', () => $('videoUpload').click());
 $('videoUpload').addEventListener('change', e => {
   uploadVideo(e.target.files[0]);
