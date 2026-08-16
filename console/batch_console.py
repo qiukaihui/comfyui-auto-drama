@@ -2791,12 +2791,12 @@ _IMG_ADAPTERS = {
 }
 
 
-def boogu_generate(prompt, filename, size="768x1024", timeout=300, refs=None, mode=None):
+def boogu_generate(prompt, filename, size="768x1024", timeout=300, refs=None, mode=None, people=None):
     """文生图统一入口：provider=comfyui 走远程 MiniMax H3 Still，否则本地 Boogu 优先、失败降级云端。"""
     cfg = _CONFIG["image_gen"]
     if str(cfg.get("provider") or "local") == "comfyui":
         ctimeout = float((cfg.get("comfyui") or {}).get("timeout") or 900)
-        return _comfyui_still_generate(prompt, filename, size, ctimeout, refs=refs, mode=mode)
+        return _comfyui_still_generate(prompt, filename, size, ctimeout, refs=refs, mode=mode, people=people)
     main, backup = _image_gen_endpoints()
     last_err = None
     if main.get("provider") == "cloud":
@@ -2873,7 +2873,7 @@ def _write_solid_png(path, width, height, rgb=(128, 128, 128)):
     return path
 
 
-def _comfyui_still_generate(prompt, filename, size="768x1024", timeout=900, refs=None, mode=None):
+def _comfyui_still_generate(prompt, filename, size="768x1024", timeout=900, refs=None, mode=None, people=None):
     """远程 ComfyUI MiniMax H3 Still 文生图（官方 T8 节点）。
 
     mode=t2i     : edit_image 用纯灰占位图，提示词纯文生图（场景图等无参考场景用）；
@@ -2898,10 +2898,18 @@ def _comfyui_still_generate(prompt, filename, size="768x1024", timeout=900, refs
         prompt = str(prompt or "") + " 环境与空间布局以 <Picture 1> 为基准。"
         if ref_imgs:
             role_tags = "、".join(f"<Picture {i + 2}>" for i in range(len(ref_imgs)))
+            try:
+                n = int(people) if people else 0
+            except (TypeError, ValueError):
+                n = 0
+            n = n or (1 if len(ref_imgs) == 1 else len(ref_imgs))
             prompt += (
-                f" 画面中只允许出现 {role_tags} 中的 {len(ref_imgs)} 个人，"
-                " 每个人的面容、发型、服装必须与对应参考图完全一致；"
+                f" 参考图 {role_tags} 是同一批角色的多角度参考（同一个人可能有正面/侧面多张图），"
+                f" 画面中只允许出现这 {n} 个角色本人，"
+                " 每个角色的面容、发型、服装必须与对应参考图完全一致；"
                 " 绝对禁止出现参考图之外的任何第三人、多余肢体、多余手指、倒影或背景人物。"
+                " 人体结构：每个人的头部与身体必须自然衔接、无错位、无拼接感，颈部正常，"
+                " 姿态符合动作描述。"
             )
     else:
         ref_strength = float(cfg.get("t2i_reference_strength") or 0.2)
@@ -3173,7 +3181,9 @@ def verify_asset(image_path, kind, expected=None, timeout=120):
         )
         q = (f"你是图片质检员。检查这张分镜图，严格只输出 JSON：{{\"ok\": true或false, \"issues\": [...]}}\n"
              f"检查项：{people_line} 1. 人物形象：{look} 2. 肢体完整：无多余手指/手臂/腿部异常纹理 "
-             "3. 画面干净：无文字乱码、无重复人物、无现代物品、道具正常（无塑料包装盒/饮料瓶）。\n"
+             "3. 人体结构：每个人的头部与身体必须自然衔接（无错位/拼接感/断头/头身朝向矛盾），"
+             "颈部正常不扭曲，姿势符合动作描述，两人互动位置关系合理 "
+             "4. 画面干净：无文字乱码、无重复人物、无现代物品、道具正常（无塑料包装盒/饮料瓶）。\n"
              "ok=true 表示全部通过；否则 ok=false 并列出具体问题。")
     try:
         content = vision_ask(image_path, q, timeout)
@@ -3210,7 +3220,10 @@ def _gen_asset_file(kind, key, prompt, expected=None, view=None, refs=None, mode
     max_tries = 8 if kind == "story" else 3
     for _ in range(max_tries):
         filename = f"{tag}_{safe}_{int(time.time() * 1000):x}_{random.randrange(16 ** 4):04x}.png"
-        fn, dest = boogu_generate(prompt, filename, "768x1024", refs=refs, mode=mode)
+        fn, dest = boogu_generate(
+            prompt, filename, "768x1024",
+            refs=refs, mode=mode, people=(expected or {}).get("people_count"),
+        )
         attempts += 1
         v = verify_asset(dest, kind, expected)
         last_fn, last_issues = fn, v.get("issues", [])
@@ -3258,7 +3271,7 @@ def _register_asset(kind, key, filename, view=None, meta=None):
 
 def _story_refs(proj, story_key):
     """分镜图参考图：场景图（Picture 1）+ 出场角色正面锚点（Picture 2+）。"""
-    raw_key = str(story_key or "").strip()
+    raw_key = ("" if story_key is None else str(story_key)).strip()
     m = re.fullmatch(r"[sS](\d+)", raw_key)
     if m:
         idx = int(m.group(1)) - 1  # 前端单张生成用 s2/s3（1 基）
@@ -3286,9 +3299,14 @@ def _story_refs(proj, story_key):
         rn = str(rn).strip()
         if not rn:
             continue
-        img = (role_views.get(rn) or {}).get("front") or role_imgs.get(rn)
-        if img:
-            refs.append(img)
+        views = role_views.get(rn) or {}
+        front = views.get("front") or role_imgs.get(rn)
+        if front:
+            refs.append(front)
+        # 侧面视角：躺姿/侧身镜头防止"正面头像贴到新身体"的错位伪影
+        side = views.get("side")
+        if side:
+            refs.append(side)
     return refs
 
 
