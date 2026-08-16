@@ -2926,7 +2926,12 @@ def verify_asset(image_path, kind, expected=None, timeout=120):
     else:
         look = expected.get("look") or ""
         people = expected.get("people_count")
-        people_line = f" 0. 画面里必须严格只有 {people} 个人，绝对没有第三人、没有多余的肢体/手臂/手伸入画面" if people else ""
+        people_line = (
+            f" 0. 画面里必须严格只有 {people} 个人（计数铁律：背景人物、画面边缘半身人、"
+            "被遮挡的人、镜像/倒影人物都算人，必须全部计入，总数必须恰好为 "
+            f"{people}，多一个即不通过）；绝对没有第三人、没有多余的肢体/手臂/手伸入画面"
+            if people else ""
+        )
         q = (f"你是图片质检员。检查这张分镜图，严格只输出 JSON：{{\"ok\": true或false, \"issues\": [...]}}\n"
              f"检查项：{people_line} 1. 人物形象：{look} 2. 肢体完整：无多余手指/手臂/腿部异常纹理 "
              "3. 画面干净：无文字乱码、无重复人物、无现代物品、道具正常（无塑料包装盒/饮料瓶）。\n"

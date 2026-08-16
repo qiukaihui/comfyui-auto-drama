@@ -2437,7 +2437,10 @@ function defaultStoryPrompt(i) {
   const roleLine = roleDesc ? `画面人物形象必须与角色设定一致：${roleDesc}。` : '';
   return p + `电影感故事板分镜图，竖构图，${projectEraZh()}风格，写实。${roleLine}`
     + `画面中严格只有剧本出现的 ${Math.max((currentScript.storyboard_list || [])[i] && ((currentScript.storyboard_list || [])[i].roles || []).length || 0, 1)} 个人，`
-    + `绝对没有额外人物、没有多余的肢体/手臂/手从画面外伸入，每人四肢完整、各两只手、手指清晰不粘连，`
+    + `人物计数铁律：全画面必须恰好 ${Math.max((currentScript.storyboard_list || [])[i] && ((currentScript.storyboard_list || [])[i].roles || []).length || 0, 1)} 人，`
+    + `绝对禁止任何第三人出现，包括背景人物、画面边缘半身人、被遮挡的人、镜像/倒影人物；`
+    + `两人身体轮廓清晰可分离，不得交叠成额外肢体；没有多余的肢体/手臂/手从画面外伸入，`
+    + `每人四肢完整、各两只手、手指清晰不粘连，`
     + `服装道具正常无穿帮，无文字乱码，无重复人物，无塑料包装盒，无饮料瓶`
     + (projectEraZh().includes('乡村') ? '，无现代物品' : '')
     + `；背景元素必须与上面「场景」描述一致（门窗/设备/位置不得凭空增加或替换）`;
