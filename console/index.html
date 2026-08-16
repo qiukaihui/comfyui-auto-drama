@@ -340,7 +340,7 @@
   <section class="panel" id="panel-5">
     <div class="card">
       <h2>参考资产 <span class="step-tag">第 5 步</span></h2>
-      <div class="desc">为角色生成锚点图、为场景生成参考图、为每段生成分镜图，保证生成视频时人物 / 场景 / 构图一致。生图走本地 Boogu-Image（快），图自动存入 <code>素材/</code> 目录。</div>
+      <div class="desc">为角色生成锚点图、为场景生成参考图、为每段生成分镜图，保证生成视频时人物 / 场景 / 构图一致。生图默认走远程 ComfyUI MiniMax H3 Still（分镜图用场景+角色参考模式，稳定恰好 N 人），图自动存入 <code>素材/</code> 目录。</div>
       <div class="row">
         <span id="booguStatus" style="font-size:12px;color:var(--muted)">检测本地生图服务…</span>
         <span style="flex:1"></span>
@@ -2385,7 +2385,7 @@ async function genAsset(kind, key, prompt, label, opts) {
   }
   const r = await fetch('/api/asset_gen', {
     method: 'POST', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({prompt, filename: fn, kind, expected}),
+    body: JSON.stringify({prompt, filename: fn, kind, key, expected}),
   });
   const d = await r.json();
   if (!r.ok) throw new Error(d.error || '生图失败');
@@ -2456,6 +2456,8 @@ function defaultStoryPrompt(i) {
     + `绝对禁止任何第三人出现，包括背景人物、画面边缘半身人、被遮挡的人、镜像/倒影人物；`
     + `两人身体轮廓清晰可分离，不得交叠成额外肢体；没有多余的肢体/手臂/手从画面外伸入，`
     + `每人四肢完整、各两只手、手指清晰不粘连，`
+    + `构图策略：双人同框中近景，两人占据画面主体（约七成以上面积），机位贴近两人；`
+    + `背景为干净虚化的墙面或床帘暗角，禁止出现门口、窗户、镜子、走廊、反光面或任何能容纳第三人的背景空间；`
     + `服装道具正常无穿帮，无文字乱码，无重复人物，无塑料包装盒，无饮料瓶`
     + (projectEraZh().includes('乡村') ? '，无现代物品' : '')
     + `；背景元素必须与上面「场景」描述一致（门窗/设备/位置不得凭空增加或替换）`;

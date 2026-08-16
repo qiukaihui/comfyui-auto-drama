@@ -5,6 +5,31 @@
 
 ---
 
+## 2026-08-17 · v0.13.28 — 文生图切换远程 MiniMax H3 Still（分镜图参考编辑模式）
+
+### 本次更新内容
+
+- **新增 `image_gen.provider: comfyui`**：角色锚点图 / 场景图 / 分镜图全部可走
+  远程 ComfyUI 的 MiniMax H3 Still 官方节点（`MiniMaxH3StillConditioningT8` +
+  `MiniMaxH3DualClockSamplerT8` + `MiniMaxH3StillDecodeT8`），替代 Boogu 生图
+- **分镜图默认 `refedit` 参考编辑模式**：场景图作 Picture 1、出场角色锚点作 Picture 2+，
+  用参考图把"恰好 N 人 / 形象一致 / 环境一致"锁死；
+  实测第 2 段双人分镜图一次通过质检（约 45 秒/张），而 Boogu 双人场景 8 次仍多第三人
+- **纯文生图 `t2i` 模式**：纯灰占位图 + 低参考强度（场景图 / 无参考时自动使用）
+- 生成走 `/prompt` 提交 + `/history` 轮询 + `/view` 下载，失败/超时自动进入现有 8 次重试质检流程
+- `config.example.json` / `CONFIG.md` / `README.md` 补充 comfyui 生图配置说明
+
+### 影响与注意事项
+
+- `config.json -> image_gen.provider: comfyui` 需重启控制台服务生效；
+  服务器需装 H3 官方 T8 节点包 + `minimax_h3_ref2va_pruned_int8_convrot.safetensors` +
+  `minimax_h3_video_vae_fp16.safetensors` + Qwen3-VL H3 CLIP
+- 参考编辑模式与纯文生图共用 `reference_strength` / `t2i_reference_strength` 两个强度旋钮，
+  可按项目调（高=更贴参考图，低=更听文字）
+- 单张耗时约 40-110 秒（steps 20 / 5 帧），比 Boogu 慢但质量与人数稳定性明显更好
+
+---
+
 ## 2026-08-17 · v0.13.26 — 质检可靠化 + 分镜重试 8 次（抽到对为止）
 
 ### 本次更新内容

@@ -2,7 +2,7 @@
 
 基于 **ComfyUI + MiniMax H3** 的自动化短剧/漫剧生产流水线：剧本生成 → 改写 → 规范提示词 → 参考资产（角色锚点图/场景图/分镜图）→ 批量视频生成 → 自动质检 → 一键合成成片。
 
-控制台本体**零第三方依赖**（Python 标准库），生成走远程 ComfyUI（H3 ref2va），文本走本地 LM Studio / 云端 API（可切换），图片走本地 Boogu / 云端 API（可切换）。
+控制台本体**零第三方依赖**（Python 标准库），生成走远程 ComfyUI（H3 ref2va），文本走本地 oMLX / LM Studio / 云端 API（可切换），图片走远程 ComfyUI MiniMax H3 Still / 本地 Boogu / 云端 API（可切换）。
 
 > 本项目为演示/教学用途。模型输出质量受提示词与工作流配置影响，请勿用于任何违法违规内容。
 
@@ -22,7 +22,7 @@ flowchart TB
 
   subgraph LOCAL["本地服务"]
     L1["语言模型<br/>oMLX(8001) / LM Studio / 云端 API"]
-    L2["文生图<br/>Boogu-Image(8081) / 云端 API"]
+    L2["文生图<br/>H3 Still(远程 ComfyUI) / Boogu-Image / 云端 API"]
     L3["视觉质检<br/>多模态模型"]
   end
 
@@ -55,7 +55,7 @@ flowchart TB
   W3 --> D2
 ```
 
-**链路一句话**：控制台把「剧本 → 提示词 → 参考资产」编排好，提交到远程 ComfyUI 用 H3 生成带原生立体声的视频，自动下载回本地合成成片；语言模型 / 文生图 / 质检全部支持本地与云端切换。
+**链路一句话**：控制台把「剧本 → 提示词 → 参考资产」编排好，提交到远程 ComfyUI 用 H3 生成带原生立体声的视频，自动下载回本地合成成片；语言模型 / 文生图 / 质检支持本地、远程 ComfyUI 与云端切换。
 
 ## 目录结构
 
@@ -92,7 +92,8 @@ comfyui项目/
 - ffmpeg（视频处理）
 - 远程或本机 ComfyUI（需安装 MiniMax H3 工作流，见下方"远程依赖"）
 - 文本模型：本地 LM Studio / Ollama（OpenAI 兼容）或任意云端 API
-- 生图服务：本地 Boogu-Image（默认 `http://127.0.0.1:8081`）或云端 API
+- 生图服务：远程 ComfyUI MiniMax H3 Still（`image_gen.provider: comfyui`，推荐）、
+  本地 Boogu-Image（`http://127.0.0.1:8081`）或云端 API（三者可切换）
 
 ### 1.5 一键环境检查
 
@@ -124,6 +125,8 @@ python -m pip install -r requirements.txt
 ```
 
 > Windows 无法本地跑 Boogu（MLX 仅 Apple Silicon），生图用云端：`config.json -> image_gen.provider: cloud`
+> 推荐：Windows / Linux 直接改用远程 ComfyUI 的 H3 Still 生图（`image_gen.provider: comfyui`），
+> 分镜图默认"场景+角色参考"模式，实测能稳定出"恰好 2 人"，且角色/场景与出片一致。
 
 **Linux**
 
@@ -133,6 +136,39 @@ python3 -m pip install -r requirements.txt
 ```
 
 > Linux 同样无法本地跑 Boogu，用云端生图。
+
+### 1.6 文生图：远程 ComfyUI MiniMax H3 Still（推荐）
+
+角色锚点图 / 场景图 / 分镜图都可以走远程 ComfyUI 的 H3 Still 官方节点
+（`MiniMaxH3StillConditioningT8` + `MiniMaxH3StillDecodeT8`），配置：
+
+```json
+{
+  "image_gen": {
+    "provider": "comfyui",
+    "comfyui": {
+      "server": "http://192.168.1.23:8188",
+      "unet": "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+      "clip": "qwen3vl_32b_h3_ultra_uncensored_heretic_int8_convrot.safetensors",
+      "vae": "minimax_h3_video_vae_fp16.safetensors",
+      "size": "768x1024",
+      "steps": 20,
+      "target_mode": "micro_video_5_frames",
+      "reference_strength": 0.75,
+      "story_mode": "refedit"
+    }
+  }
+}
+```
+
+- **分镜图默认 `refedit` 模式**：场景图作 Picture 1、出场角色锚点作 Picture 2+，
+  参考图把"人数 / 形象 / 环境"锁死，解决 Boogu 双人场景多画第三人的问题
+  （实测单张约 45 秒，质检通过率显著高于纯文生图）
+- 服务器需装 H3 官方节点包（含 T8 Still 节点）与 `minimax_h3_ref2va_pruned_int8_convrot.safetensors`、
+  `minimax_h3_video_vae_fp16.safetensors`、Qwen3-VL H3 CLIP（可换未审查版）
+- 纯文字生图（场景图等）自动用 `t2i` 模式：纯灰占位图 + 低参考强度
+- 速度档位：`steps: 12` 更快、`20` 质量更好；`target_mode` 可选
+  `direct_1_frame`（最快）/ `micro_video_5_frames`（推荐）/ `short_video_22_frames`（更稳）
 
 ### 2. 配置
 

@@ -33,6 +33,19 @@
       "base_url": "https://api.openai.com/v1",
       "api_key": "",
       "model": "gpt-image-1"
+    },
+    "comfyui": {
+      "server": "http://127.0.0.1:8188",
+      "unet": "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+      "clip": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "vae": "minimax_h3_video_vae_fp16.safetensors",
+      "size": "768x1024",
+      "steps": 20,
+      "target_mode": "micro_video_5_frames",
+      "reference_strength": 0.75,
+      "t2i_reference_strength": 0.2,
+      "story_mode": "refedit",
+      "timeout": 900
     }
   },
   "vision": {

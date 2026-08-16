@@ -58,6 +58,19 @@ _CONFIG_DEFAULTS = {
         "provider_type": "openai",
         "local": {"url": "http://127.0.0.1:8081"},
         "cloud": {"enabled": False, "base_url": "https://api.openai.com/v1", "api_key": "", "model": "gpt-image-1"},
+        "comfyui": {
+            "server": "http://127.0.0.1:8188",
+            "unet": "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+            "clip": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+            "vae": "minimax_h3_video_vae_fp16.safetensors",
+            "size": "768x1024",
+            "steps": 20,
+            "target_mode": "micro_video_5_frames",
+            "reference_strength": 0.75,
+            "t2i_reference_strength": 0.2,
+            "story_mode": "refedit",
+            "timeout": 900,
+        },
     },
     "vision": {"base_url": "http://127.0.0.1:8001/v1", "api_key": "", "model": "qwen-vl-max"},
     "models": {
@@ -2778,8 +2791,12 @@ _IMG_ADAPTERS = {
 }
 
 
-def boogu_generate(prompt, filename, size="768x1024", timeout=300):
-    """文生图统一入口：本地 Boogu 优先，配置云端或本地失败时降级云端。"""
+def boogu_generate(prompt, filename, size="768x1024", timeout=300, refs=None, mode=None):
+    """文生图统一入口：provider=comfyui 走远程 MiniMax H3 Still，否则本地 Boogu 优先、失败降级云端。"""
+    cfg = _CONFIG["image_gen"]
+    if str(cfg.get("provider") or "local") == "comfyui":
+        ctimeout = float((cfg.get("comfyui") or {}).get("timeout") or 900)
+        return _comfyui_still_generate(prompt, filename, size, ctimeout, refs=refs, mode=mode)
     main, backup = _image_gen_endpoints()
     last_err = None
     if main.get("provider") == "cloud":
@@ -2822,6 +2839,215 @@ def _boogu_local(prompt, filename, size="768x1024", timeout=300):
     with open(dest, "wb") as f:
         f.write(raw)
     return filename, dest
+
+
+def _parse_img_size(size):
+    """'768x1024' / '768*1024' → (宽, 高)；H3 Still 画布必须是 32 的倍数。"""
+    m = re.fullmatch(r"\s*(\d+)\s*[xX*]\s*(\d+)\s*", str(size or "").strip())
+    if not m:
+        raise ValueError(f"非法图片尺寸：{size}（应为 宽x高）")
+    w, h = int(m.group(1)), int(m.group(2))
+    if w % 32 or h % 32:
+        raise ValueError(f"H3 Still 画布宽高必须是 32 的倍数：{size}")
+    return w, h
+
+
+def _write_solid_png(path, width, height, rgb=(128, 128, 128)):
+    """纯标准库写纯色 PNG（H3 Still 纯文生图需要 edit_image 占位图）。"""
+    import struct
+    import zlib
+
+    def chunk(tag, data):
+        c = tag + data
+        return struct.pack(">I", len(data)) + c + struct.pack(">I", zlib.crc32(c) & 0xFFFFFFFF)
+
+    raw = b"".join(b"\x00" + bytes(rgb) * width for _ in range(height))
+    png = (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(raw, 6))
+        + chunk(b"IEND", b"")
+    )
+    with open(path, "wb") as f:
+        f.write(png)
+    return path
+
+
+def _comfyui_still_generate(prompt, filename, size="768x1024", timeout=900, refs=None, mode=None):
+    """远程 ComfyUI MiniMax H3 Still 文生图（官方 T8 节点）。
+
+    mode=t2i     : edit_image 用纯灰占位图，提示词纯文生图（场景图等无参考场景用）；
+    mode=refedit : edit_image=场景图（refs[0]），ref_images=角色锚点（refs[1:]），
+                   画面人数/形象被参考图锁死，解决"多画第三人/多余肢体"问题。
+    """
+    cfg = _CONFIG.get("image_gen", {}).get("comfyui") or {}
+    server = str(cfg.get("server") or DEFAULT_SERVER).rstrip("/")
+    unet = str(cfg.get("unet") or "minimax_h3_ref2va_pruned_int8_convrot.safetensors")
+    clip_name = str(cfg.get("clip") or "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors")
+    vae = str(cfg.get("vae") or "minimax_h3_video_vae_fp16.safetensors")
+    steps = int(cfg.get("steps") or 20)
+    target_mode = str(cfg.get("target_mode") or "micro_video_5_frames")
+    width, height = _parse_img_size(size or cfg.get("size") or "768x1024")
+    refs = [str(x) for x in (refs or []) if str(x).strip()]
+    mode = str(mode or "").strip() or ("refedit" if refs else "t2i")
+    if mode == "refedit" and not refs:
+        mode = "t2i"
+    ref_imgs = refs[1:] if mode == "refedit" else []
+    if mode == "refedit":
+        ref_strength = float(cfg.get("reference_strength") or 0.75)
+        prompt = str(prompt or "") + " 环境与空间布局以 <Picture 1> 为基准。"
+        if ref_imgs:
+            role_tags = "、".join(f"<Picture {i + 2}>" for i in range(len(ref_imgs)))
+            prompt += (
+                f" 画面中只允许出现 {role_tags} 中的 {len(ref_imgs)} 个人，"
+                " 每个人的面容、发型、服装必须与对应参考图完全一致；"
+                " 绝对禁止出现参考图之外的任何第三人、多余肢体、多余手指、倒影或背景人物。"
+            )
+    else:
+        ref_strength = float(cfg.get("t2i_reference_strength") or 0.2)
+
+    # 1) 准备 edit_image：refedit 用场景图，t2i 用纯灰占位图；上传到服务器 input 目录
+    if mode == "refedit":
+        edit_local = find_image(refs[0])
+        if not edit_local:
+            raise RuntimeError(f"找不到场景参考图：{refs[0]}")
+        edit_fn = os.path.basename(refs[0])
+    else:
+        edit_fn = f"_h3_still_placeholder_{width}x{height}.png"
+        edit_local = os.path.join(tempfile.gettempdir(), edit_fn)
+        if not os.path.isfile(edit_local):
+            _write_solid_png(edit_local, width, height)
+    upload_image(server, edit_local, edit_fn)
+
+    # 2) 角色锚点参考图（ref_images，Picture 2+）
+    for r in ref_imgs:
+        lp = find_image(r)
+        if not lp:
+            raise RuntimeError(f"找不到角色参考图：{r}")
+        upload_image(server, lp, os.path.basename(r))
+
+    # 3) 构建 H3 Still API 图（官方 T8 节点结构，见 T8mars 官方示例）
+    graph = {
+        "1": {"class_type": "LoadImage", "inputs": {"image": edit_fn}},
+        "2": {"class_type": "VAELoader", "inputs": {"vae_name": vae}},
+        "3": {"class_type": "CLIPLoader", "inputs": {"clip_name": clip_name, "type": "minimax", "device": "default"}},
+        "4": {"class_type": "UNETLoader", "inputs": {"unet_name": unet, "weight_dtype": "default"}},
+    }
+    cond_inputs = {
+        "clip": ["3", 0],
+        "video_vae": ["2", 0],
+        "prompt": prompt,
+        "canvas_mode": "custom",
+        "width": width,
+        "height": height,
+        "target_mode": target_mode,
+        "reference_strength": ref_strength,
+        "audio_target": "generate_and_discard",
+        "strict_prompt_tags": True,
+        "ref_image_size": "match",
+        "edit_image": ["1", 0],
+    }
+    nid = 5
+    if ref_imgs:
+        for i, r in enumerate(ref_imgs, 1):
+            graph[str(nid)] = {"class_type": "LoadImage", "inputs": {"image": os.path.basename(r)}}
+            # V3 节点 autogrow 输入用打平点号键（ref_images.ref_image_N）
+            cond_inputs[f"ref_images.ref_image_{i}"] = [str(nid), 0]
+            nid += 1
+    graph[str(nid)] = {
+        "class_type": "MiniMaxH3StillConditioningT8",
+        "inputs": cond_inputs,
+    }
+    cond_id = str(nid)
+    nid += 1
+    graph[str(nid)] = {
+        "class_type": "MiniMaxH3DualClockSamplerT8",
+        "inputs": {
+            "model": ["4", 0],
+            "av_latent": [cond_id, 1],
+            "steps": steps,
+            "shift_video": 12.0,
+            "shift_audio": 3.0,
+        },
+    }
+    sampler_id = str(nid)
+    nid += 1
+    graph[str(nid)] = {"class_type": "RandomNoise", "inputs": {"noise_seed": random.randrange(2 ** 31)}}
+    noise_id = str(nid)
+    nid += 1
+    graph[str(nid)] = {"class_type": "BasicGuider", "inputs": {"model": [sampler_id, 0], "conditioning": [cond_id, 0]}}
+    guider_id = str(nid)
+    nid += 1
+    graph[str(nid)] = {
+        "class_type": "SamplerCustomAdvanced",
+        "inputs": {
+            "noise": [noise_id, 0],
+            "guider": [guider_id, 0],
+            "sampler": [sampler_id, 1],
+            "sigmas": [sampler_id, 2],
+            "latent_image": [cond_id, 1],
+        },
+    }
+    sample_id = str(nid)
+    nid += 1
+    graph[str(nid)] = {
+        "class_type": "MiniMaxH3StillDecodeT8",
+        "inputs": {"av_latent": [sample_id, 0], "video_vae": ["2", 0], "frame_selection": "middle", "frame_index": 0},
+    }
+    decode_id = str(nid)
+    nid += 1
+    graph[str(nid)] = {
+        "class_type": "SaveImage",
+        "inputs": {"filename_prefix": "H3_Still_Storyboard", "images": [decode_id, 0]},
+    }
+
+    # 4) 提交 + 轮询 /history 取结果
+    try:
+        resp = api_post(server, "/prompt", {"prompt": graph, "client_id": "batch_console"}, timeout=60)
+    except Exception as e:
+        raise RuntimeError(f"H3 Still 提交失败：{e}")
+    if resp.get("node_errors"):
+        detail = json.dumps(resp["node_errors"], ensure_ascii=False)[:500]
+        raise RuntimeError(f"H3 Still 节点校验失败：{detail}")
+    pid = resp.get("prompt_id")
+    if not pid:
+        raise RuntimeError(f"H3 Still 提交异常：{resp}")
+    deadline = time.time() + float(timeout)
+    while time.time() < deadline:
+        time.sleep(3)
+        try:
+            hist = api_get(server, f"/history/{pid}", timeout=15)
+        except Exception:
+            continue
+        entry = (hist or {}).get(pid)
+        if not entry:
+            continue
+        status = entry.get("status") or {}
+        if status.get("status_str") == "error":
+            msgs = json.dumps(status.get("messages") or [], ensure_ascii=False)[:300]
+            raise RuntimeError(f"H3 Still 生成失败：{msgs}")
+        for _node_id, out in (entry.get("outputs") or {}).items():
+            for im in out.get("images", []):
+                q = urllib.parse.urlencode({
+                    "filename": im.get("filename", ""),
+                    "subfolder": im.get("subfolder", ""),
+                    "type": im.get("type", "output"),
+                })
+                req = urllib.request.Request(server + "/view?" + q, headers={"User-Agent": "batch-console"})
+                with _opener().open(req, timeout=600) as r:
+                    raw = r.read()
+                if not filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+                    filename += ".png"
+                dest = os.path.join(IMAGE_DIRS[0], filename)
+                with open(dest, "wb") as f:
+                    f.write(raw)
+                return filename, dest
+    raise RuntimeError(f"H3 Still 生成超时（{timeout}s）；远程队列可能丢失，请检查 ComfyUI 状态")
+
+
+def _still_cfg():
+    """image_gen.comfyui 配置（do_POST 内不能直接用 _CONFIG，会撞 global 声明）。"""
+    return _CONFIG.get("image_gen", {}).get("comfyui") or {}
 
 
 # ---------- 图片自动质检（本地视觉服务 8001） ----------
@@ -2972,7 +3198,7 @@ def verify_asset(image_path, kind, expected=None, timeout=120):
 _ASSET_TAG = {"role": "锚点", "scene": "场景", "story": "分镜"}
 
 
-def _gen_asset_file(kind, key, prompt, expected=None, view=None):
+def _gen_asset_file(kind, key, prompt, expected=None, view=None, refs=None, mode=None):
     """生图 + 质检（最多 3 次，每次随机 seed 出新图）。返回 (filename, verified, issues, attempts)。"""
     expected = dict(expected or {})
     if view:
@@ -2984,7 +3210,7 @@ def _gen_asset_file(kind, key, prompt, expected=None, view=None):
     max_tries = 8 if kind == "story" else 3
     for _ in range(max_tries):
         filename = f"{tag}_{safe}_{int(time.time() * 1000):x}_{random.randrange(16 ** 4):04x}.png"
-        fn, dest = boogu_generate(prompt, filename, "768x1024")
+        fn, dest = boogu_generate(prompt, filename, "768x1024", refs=refs, mode=mode)
         attempts += 1
         v = verify_asset(dest, kind, expected)
         last_fn, last_issues = fn, v.get("issues", [])
@@ -3030,6 +3256,42 @@ def _register_asset(kind, key, filename, view=None, meta=None):
     save_state(st)
 
 
+def _story_refs(proj, story_key):
+    """分镜图参考图：场景图（Picture 1）+ 出场角色正面锚点（Picture 2+）。"""
+    raw_key = str(story_key or "").strip()
+    m = re.fullmatch(r"[sS](\d+)", raw_key)
+    if m:
+        idx = int(m.group(1)) - 1  # 前端单张生成用 s2/s3（1 基）
+    else:
+        try:
+            idx = int(raw_key)
+        except (TypeError, ValueError):
+            return []
+    sb = ((proj.get("current_script") or {}).get("storyboard_list")) or []
+    seg = sb[idx] if 0 <= idx < len(sb) else {}
+    if not seg:
+        return []
+    ai = proj.get("asset_imgs") or {}
+    scene_imgs = ai.get("scene") or {}
+    role_imgs = ai.get("role") or {}
+    role_views = ai.get("roleViews") or {}
+    refs = []
+    scene_name = str(_pick(seg, "scene", "location", "place", "scene_name") or "").strip()
+    if scene_name and scene_imgs.get(scene_name):
+        refs.append(scene_imgs[scene_name])
+    roles = seg.get("roles") or []
+    if isinstance(roles, str):
+        roles = [roles]
+    for rn in roles:
+        rn = str(rn).strip()
+        if not rn:
+            continue
+        img = (role_views.get(rn) or {}).get("front") or role_imgs.get(rn)
+        if img:
+            refs.append(img)
+    return refs
+
+
 def start_assets_batch_job(items):
     """服务端后台批量生图任务（每张立即保存，前端轮询进度，刷新页面可恢复）。"""
     tid = "assets_" + uuid.uuid4().hex[:10]
@@ -3043,6 +3305,10 @@ def start_assets_batch_job(items):
     def work():
         job["status"] = "running"
         try:
+            st0 = load_state()
+            proj = dict(st0.get("project") or {})
+            still_cfg = _CONFIG.get("image_gen", {}).get("comfyui") or {}
+            story_mode = str(still_cfg.get("story_mode") or "refedit")
             for i, item in enumerate(items):
                 kind = item.get("kind") or "story"
                 key = item.get("key")
@@ -3052,7 +3318,14 @@ def start_assets_batch_job(items):
                 label = item.get("label") or f"{kind} {key}"
                 job["current"] = label
                 try:
-                    fn, ok, issues, attempts = _gen_asset_file(kind, key, prompt, expected, view)
+                    refs = item.get("refs")
+                    mode = item.get("mode")
+                    if kind == "story":
+                        if not refs:
+                            refs = _story_refs(proj, key)
+                        if not mode:
+                            mode = story_mode
+                    fn, ok, issues, attempts = _gen_asset_file(kind, key, prompt, expected, view, refs, mode)
                     _register_asset(kind, key, fn, view, {"verified": ok, "issues": issues, "attempts": attempts})
                 except Exception as e:
                     print(f"[assets] {label} 失败：{e}", flush=True)
@@ -4145,15 +4418,25 @@ class Handler(BaseHTTPRequestHandler):
             prompt = body.get("prompt", "")
             filename = body.get("filename", "")
             kind = body.get("kind", "story")
+            key = body.get("key")
             expected = body.get("expected") or {}
             if not prompt.strip() or not filename.strip():
                 self._send(400, json.dumps({"error": "缺少 prompt 或 filename"}, ensure_ascii=False))
                 return
+            # 分镜图走参考编辑模式：场景图 + 出场角色锚点（与批量任务一致）
+            refs, mode = None, None
+            if kind == "story":
+                st0 = load_state()
+                proj = dict(st0.get("project") or {})
+                refs = _story_refs(proj, key)
+                still_cfg = _still_cfg()
+                mode = str(still_cfg.get("story_mode") or "refedit")
             attempts = 0
             last_fn, last_issues = None, []
-            while attempts < 3:
+            max_tries = 8 if kind == "story" else 3
+            while attempts < max_tries:
                 try:
-                    fn, dest = boogu_generate(prompt, filename, "768x1024")
+                    fn, dest = boogu_generate(prompt, filename, "768x1024", refs=refs, mode=mode)
                 except Exception as e:
                     self._send(400, json.dumps({"error": f"Boogu 生图失败：{e}"}, ensure_ascii=False))
                     return
