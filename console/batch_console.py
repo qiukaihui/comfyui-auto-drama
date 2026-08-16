@@ -2391,24 +2391,30 @@ def llm_text_to_script(text, token="", segments=0):
 
 
 def _extract_json_obj(out):
-    """从 LLM 输出里提取 JSON 对象（容忍 markdown 包裹/前后废话）。"""
+    """从 LLM 输出里提取 JSON 对象（容忍 markdown 包裹/思考废话/多候选块）。"""
     s = str(out or "").strip()
     m = re.search(r"```(?:json|JSON)?\s*([\s\S]*?)```", s)
     if m:
         s = m.group(1).strip()
-    start, end = s.find("{"), s.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        return None
-    raw = s[start:end + 1]
-    try:
-        return json.loads(raw)
-    except Exception:
+    starts = [i for i, ch in enumerate(s) if ch == "{"]
+    for start in reversed(starts):  # 从后往前试，优先取真正的 JSON 对象
+        end = s.rfind("}", start)
+        if end <= start:
+            continue
+        raw = s[start:end + 1]
+        try:
+            return json.loads(raw)
+        except Exception:
+            pass
+        # 容忍修复：去尾逗号 / 行注释 / 单引号键
         cleaned = re.sub(r",\s*([}\]])", r"\1", raw)
         cleaned = re.sub(r"//[^\n]*", "", cleaned)
+        cleaned = cleaned.replace("'", '"')
         try:
             return json.loads(cleaned)
         except Exception:
-            return None
+            continue
+    return None
 
 
 def llm_generate_script(topic, style="", segments=10, token=""):
@@ -2869,6 +2875,9 @@ def vision_ask(image_path, prompt, timeout=120):
         ]}],
         "stream": False, "max_tokens": 1024,
     }
+    # 本地 oMLX：关闭思考模式，让质检模型直接输出 JSON（实测 enable_thinking=false 输出干净稳定）
+    if "127.0.0.1" in base or "localhost" in base:
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
     headers = {"Content-Type": "application/json"}
     if key:
         headers["Authorization"] = f"Bearer {key}"
@@ -2971,7 +2980,9 @@ def _gen_asset_file(kind, key, prompt, expected=None, view=None):
     tag = _ASSET_TAG.get(kind, kind)
     safe = re.sub(r'[\\/:*?"<>|]', '', str(key))[:20] or "x"
     last_fn, last_issues, attempts = None, [], 0
-    for _ in range(3):
+    # 分镜图抽卡概率约 1/4（双人场景 Boogu 容易多画人），重试 8 次大幅提高出对概率
+    max_tries = 8 if kind == "story" else 3
+    for _ in range(max_tries):
         filename = f"{tag}_{safe}_{int(time.time() * 1000):x}_{random.randrange(16 ** 4):04x}.png"
         fn, dest = boogu_generate(prompt, filename, "768x1024")
         attempts += 1
@@ -2980,9 +2991,9 @@ def _gen_asset_file(kind, key, prompt, expected=None, view=None):
         if v.get("ok"):
             return fn, True, [], attempts
         time.sleep(1)
-    # 分镜图人数是硬性指标：3 次质检都不过就不再入库，交给上层报错
+    # 分镜图人数是硬性指标：8 次质检都不过就不再入库，交给上层报错
     if kind == "story" and not v.get("ok"):
-        raise ValueError(f"质检未通过（3 次）：{'；'.join(last_issues)[:200] or '人数/穿帮异常'}")
+        raise ValueError(f"质检未通过（{max_tries} 次）：{'；'.join(last_issues)[:200] or '人数/穿帮异常'}")
     return last_fn, False, last_issues, attempts
 
 
