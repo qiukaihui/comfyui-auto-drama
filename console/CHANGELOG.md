@@ -5,6 +5,24 @@
 
 ---
 
+## 2026-08-17 · v0.13.29 — Boogu 服务透传 negative 提示词（官方参数核实）
+
+### 本次更新内容
+
+- `scripts/boogu_server.py` 支持 `negative` 请求字段（透传给管线 `generate(negative=...)`），
+  供后续 Base 变体（CFG 2-5）做负面约束
+- 核实官方参数表（boogu-project/Boogu-Image）：Turbo=4 步 / CFG 1.0（蒸馏模型不用负面词）；
+  Base=25-50 步 / CFG 2.0-5.0。实测开 CFG 3.0 + 负面提示词对 Turbo 仍压不住"第三人/多余肢体"
+  （8 步仍出多余肢体，24 步动作崩坏且 192s/张），结论：人数控制弱是 Turbo 变体能力边界，
+  不是调用参数问题；可控路径是 Base 变体或 H3 Still 参考编辑模式
+
+### 影响与注意事项
+
+- 本地 Boogu 服务（`~/boogu_server.py`）已同步该改动并重启；控制台仍默认 `provider: comfyui`
+- 如需试 Base：`BOOGU_MODEL=~/.boogu/models/Boogu-Image-0.1-Base-4bit` 重启服务即可
+
+---
+
 ## 2026-08-17 · v0.13.28 — 文生图切换远程 MiniMax H3 Still（分镜图参考编辑模式）
 
 ### 本次更新内容

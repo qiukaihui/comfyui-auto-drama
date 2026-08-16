@@ -76,6 +76,7 @@ def models():
 async def generate(request: Request):
     body = await request.json()
     prompt = body.get("prompt", "")
+    negative = body.get("negative", "")
     size = body.get("size", "1024x1024")
     n = min(int(body.get("n", 1)), 4)
     steps = int(body.get("steps", 4))
@@ -92,8 +93,8 @@ async def generate(request: Request):
     for i in range(n):
         s = (seed + i) if seed is not None else None
         seed_val = s if s is not None else random.randint(0, 2 ** 31 - 1)  # 未传 seed 时随机，避免每次同一张图
-        img = p.generate(prompt, height=h, width=w, steps=steps, guidance=guidance,
-                         seed=seed_val)
+        img = p.generate(prompt, negative=negative, height=h, width=w, steps=steps,
+                         guidance=guidance, seed=seed_val)
         buf = io.BytesIO()
         Image.fromarray(img).save(buf, format="PNG")
         out.append({"b64_json": base64.b64encode(buf.getvalue()).decode()})
