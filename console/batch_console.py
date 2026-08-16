@@ -288,12 +288,14 @@ def list_images():
 
 
 def list_media():
-    """列出素材目录里的视频/音频文件（参考视频用）。"""
+    """列出素材目录里的视频/音频文件（参考视频用）。排除合成成片（合成_*），避免误当参考。"""
     found = []
     for d in IMAGE_DIRS:
         if not os.path.isdir(d):
             continue
         for fn in sorted(os.listdir(d)):
+            if fn.startswith("合成_"):
+                continue
             if fn.lower().endswith((".mp4", ".webm", ".mov", ".mkv", ".wav", ".mp3")):
                 found.append(fn)
     return found
