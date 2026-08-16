@@ -164,6 +164,46 @@ def estimate_timeout(task):
     return int(est * 1.5)  # 再留 50% 余量
 
 
+_ASSET_REF_RE = re.compile(r"[\w\u4e00-\u9fff\-]+\.(?:png|jpe?g|webp)", re.IGNORECASE)
+
+
+def check_prompt_asset_refs(tasks):
+    """提交前校验：提示词里引用的图片文件名必须存在于当前项目资产表，
+    防止旧项目遗留的提示词（角色已改名/换项目后未重新生成）带错参考图。
+    返回过期任务列表 [{name, missing}]；为空则通过。
+    """
+    st = load_state()
+    proj = st.get("project") or {}
+    ai = proj.get("asset_imgs") or {}
+    valid = set()
+
+    def add(fn):
+        if fn:
+            valid.add(os.path.basename(str(fn)))
+
+    for grp in ("role", "scene", "story"):
+        for v in (ai.get(grp) or {}).values():
+            add(v)
+    for rv in (ai.get("roleViews") or {}).values():
+        for v in (rv or {}).values():
+            add(v)
+    # 提交任务实际携带的参考图也算有效（手动上传/未登记文件）
+    for t in (tasks or []):
+        for img in (t.get("images") or []):
+            add(img)
+        add(t.get("image"))
+        add(t.get("story_image"))
+
+    stale = []
+    for t in (tasks or []):
+        p = str(t.get("prompt") or "")
+        refs = sorted({r.lower() for r in _ASSET_REF_RE.findall(p)})
+        missing = [r for r in refs if r not in valid]
+        if missing:
+            stale.append({"name": str(t.get("name") or t.get("id") or "?"), "missing": missing})
+    return stale
+
+
 # ---------- HTTP 工具 ----------
 
 def _opener():
@@ -4597,6 +4637,16 @@ class Handler(BaseHTTPRequestHandler):
             scene_image = body.get("scene_image") or None
             if not tasks:
                 self._send(400, json.dumps({"error": "没有任务"}, ensure_ascii=False))
+                return
+            stale = check_prompt_asset_refs(tasks)
+            if stale:
+                detail = "；".join(
+                    f"{s['name']} 缺 {','.join(s['missing'][:6])}" for s in stale[:5]
+                )
+                self._send(400, json.dumps({
+                    "error": f"提示词引用了当前项目不存在的参考图（疑似旧项目遗留），请重新生成规范提示词后再提交：{detail}",
+                    "stale": stale,
+                }, ensure_ascii=False))
                 return
             results, err, warnings = submit_tasks(server, tasks, auto, chain, role_images, scene_image)
             if err:
