@@ -923,7 +923,7 @@ function renderScriptTable(script) {
   $('scriptTableWrap').innerHTML = `
     <div class="hint" style="margin-bottom:8px">🎬 <b>${esc(script.title || '')}</b> · ${sb.length} 段 · 角色：${esc(roles || '未定义')}</div>
     <div class="tablewrap"><table>
-      <thead><tr><th>#</th><th>场景</th><th>角色</th><th>动作</th><th>对白</th><th>情绪</th><th>运镜</th><th>时长</th></tr></thead>
+      <thead><tr><th>#</th><th>场景</th><th>角色</th><th>动作</th><th>对白</th><th>情绪</th><th>运镜</th><th>时长</th><th>操作</th></tr></thead>
       <tbody>${sb.map((s, i) => `<tr>
         <td>${i+1}</td>
         <td><input type="text" class="sb-scene" value="${esc(s.scene || '')}" style="width:110px"></td>
@@ -933,6 +933,7 @@ function renderScriptTable(script) {
         <td><input type="text" class="sb-emotion" value="${esc(s.emotion || '')}" style="width:100px"></td>
         <td><input type="text" class="sb-camera" value="${esc(s.camera || '')}" style="width:110px"></td>
         <td><input type="number" class="sb-duration" value="${s.duration || 10}" style="width:60px"></td>
+        <td><button class="btn" style="padding:2px 8px;font-size:11px;color:var(--red)" onclick="deleteScriptRow(${i})">🗑️ 删除</button></td>
       </tr>`).join('')}</tbody>
     </table></div>
     <div class="hint" style="margin-top:8px">可直接在表格里修改，然后点「AI 改写」进入下一步，或点「确认使用」直接采用。</div>`;
@@ -942,6 +943,27 @@ function renderScriptTable(script) {
       <button class="btn ghost" onclick="skipRewrite()">跳过改写，直接生成提示词</button>
     </div>`);
   $('btnConfirmScript').disabled = false;
+}
+
+function deleteScriptRow(i) {
+  const script = collectScriptFromTable();
+  if (!script) return;
+  const sb = script.storyboard_list || [];
+  if (i < 0 || i >= sb.length) return;
+  sb.splice(i, 1);
+  script.storyboard_list = sb.map((s, idx) => ({...s, id: idx + 1}));
+  scriptBefore = script;
+  currentScript = script;
+  // 段数变化后旧的提示词按索引对应会错位，清空提示词提醒重新生成
+  if (promptTasks.length) {
+    promptTasks = [];
+    $('promptCards').innerHTML = '<div class="empty">剧本段数已变化，请重新生成规范提示词</div>';
+    toast('⚠️ 已删除段落，提示词需重新生成（第 4 步）');
+  } else {
+    toast('🗑️ 段落已删除');
+  }
+  renderScriptTable(script);
+  autoSaveProject(true);
 }
 
 async function generateScript() {
@@ -995,7 +1017,7 @@ async function doPaste() {
       toastLoading('🤖 剧本片段 AI 转换中（约 1-2 分钟），完成前请勿关闭页面…');
       r = await fetch('/api/parse_script_text', {
         method: 'POST', headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({text, lmstudio_token: $('lmToken').value.trim()}),
+        body: JSON.stringify({text, segments: parseInt($('segmentsInput').value) || 0, lmstudio_token: $('lmToken').value.trim()}),
       });
     } else {
       toastLoading('导入解析中…');

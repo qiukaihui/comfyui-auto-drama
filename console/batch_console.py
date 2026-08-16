@@ -2366,11 +2366,18 @@ def save_rule(name, content, reset=False):
     return True
 
 
-def llm_text_to_script(text, token=""):
-    """自然语言剧本/剧情文字 → 结构化剧本 JSON。"""
+def llm_text_to_script(text, token="", segments=0):
+    """自然语言剧本/剧情文字 → 结构化剧本 JSON。segments>0 时强制正好 N 段。"""
+    user_content = str(text)[:8000]
+    if segments and segments > 0:
+        user_content = (
+            f"【段数硬性要求】必须正好拆成 {segments} 段（每段 5-15 秒），"
+            "不许多拆、不许少拆、不许合并成 1 段以外的数量。\n\n"
+            + user_content
+        )
     resp = lmstudio_chat([
         {"role": "system", "content": SCRIPT_TEXT_SYSTEM},
-        {"role": "user", "content": str(text)[:8000]},
+        {"role": "user", "content": user_content},
     ], token)
     content = resp.get("choices", [{}])[0].get("message", {}).get("content", "")
     data = _extract_json_obj(content)
@@ -4288,6 +4295,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/parse_script_text":
             text = body.get("text", "")
             token = _lm_token(body)
+            try:
+                segments = int(body.get("segments") or 0)
+            except (TypeError, ValueError):
+                segments = 0
             if body.get("lmstudio_token"):
                 st = load_state()
                 st["lmstudio_token"] = str(body["lmstudio_token"]).strip()
@@ -4296,7 +4307,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(400, json.dumps({"error": "请粘贴剧本内容"}, ensure_ascii=False))
                 return
             try:
-                script = llm_text_to_script(text, token)
+                script = llm_text_to_script(text, token, segments)
             except Exception as e:
                 self._send(400, json.dumps({"error": f"剧本转换失败：{e}"}, ensure_ascii=False))
                 return
