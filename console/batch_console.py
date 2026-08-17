@@ -2564,13 +2564,14 @@ def _extract_json_obj(out):
     return None
 
 
-def llm_generate_script(topic, style="", segments=10, token=""):
+def llm_generate_script(topic, style="", segments=10, token="", genre=""):
     """剧情梗概 → AI 生成完整剧本（role_list + storyboard_list）。"""
     user = (
         f"题材/梗概：{topic or ''}\n"
-        f"风格要求：{style or '怀旧温情、1980s 中国乡村校园'}\n"
-        f"段数：{segments} 段左右\n"
-        "请创作完整剧本 JSON。"
+        + (f"内容类型：{genre}\n" if str(genre or "").strip() else "")
+        + f"风格要求：{style or '怀旧温情、1980s 中国乡村校园'}\n"
+        + f"段数：{segments} 段左右\n"
+        + "请创作完整剧本 JSON。"
     )
     resp = lmstudio_chat([
         {"role": "system", "content": SCRIPT_GEN_SYSTEM},
@@ -4878,6 +4879,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/generate_script":
             topic = body.get("topic", "")
             style = body.get("style", "")
+            genre = body.get("type", "")
             segments = int(body.get("segments") or 10)
             token = _lm_token(body)
             if body.get("lmstudio_token"):
@@ -4888,7 +4890,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(400, json.dumps({"error": "请填写剧情梗概/题材"}, ensure_ascii=False))
                 return
             try:
-                script = llm_generate_script(topic, style, segments, token)
+                script = llm_generate_script(topic, style, segments, token, genre)
             except Exception as e:
                 self._send(400, json.dumps({"error": f"剧本生成失败：{e}"}, ensure_ascii=False))
                 return

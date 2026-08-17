@@ -251,7 +251,17 @@
       <div class="grid">
         <label class="field">项目名 <input type="text" id="projectName" placeholder="如：麦田告白"></label>
         <label class="field">类型
-          <select id="projectType"><option>青春短剧</option><option>都市情感</option><option>悬疑剧情</option><option>产品解说</option><option>数字人口播</option></select>
+          <input id="projectType" list="projectTypeList" value="青春短剧" placeholder="选择或输入内容类型">
+          <datalist id="projectTypeList">
+            <option>青春短剧</option><option>都市情感</option><option>悬疑剧情</option>
+            <option>古装年代</option><option>家庭伦理</option><option>职场励志</option>
+            <option>甜宠</option><option>虐恋</option><option>复仇逆袭</option>
+            <option>战神归来</option><option>穿越重生</option><option>萌宝亲情</option>
+            <option>乡村年代</option><option>校园青春</option><option>科幻</option>
+            <option>惊悚</option><option>喜剧</option><option>武侠</option><option>玄幻</option>
+            <option>产品解说</option><option>数字人口播</option><option>情感语录</option>
+            <option>知识科普</option><option>企业宣传</option>
+          </datalist>
         </label>
         <label class="field">画幅
           <select id="projectAspect"><option>竖版 1080×1920</option><option>横版 1920×1080</option></select>
@@ -1017,7 +1027,7 @@ async function generateScript() {
   try {
     const r = await fetch('/api/generate_script', {
       method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({topic, style: $('styleInput').value, segments: parseInt($('segmentsInput').value) || 10, lmstudio_token: $('lmToken').value.trim()}),
+      body: JSON.stringify({topic, type: $('projectType').value, style: $('styleInput').value, segments: parseInt($('segmentsInput').value) || 10, lmstudio_token: $('lmToken').value.trim()}),
     });
     const d = await r.json();
     if (!r.ok) { toast(d.error || '生成失败', true); return; }
