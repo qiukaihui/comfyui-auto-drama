@@ -251,8 +251,7 @@
       <div class="grid">
         <label class="field">项目名 <input type="text" id="projectName" placeholder="如：麦田告白"></label>
         <label class="field">类型
-          <input id="projectType" list="projectTypeList" value="青春短剧" placeholder="选择或输入内容类型">
-          <datalist id="projectTypeList">
+          <select id="projectType">
             <option>青春短剧</option><option>都市情感</option><option>悬疑剧情</option>
             <option>古装年代</option><option>家庭伦理</option><option>职场励志</option>
             <option>甜宠</option><option>虐恋</option><option>复仇逆袭</option>
@@ -261,7 +260,9 @@
             <option>惊悚</option><option>喜剧</option><option>武侠</option><option>玄幻</option>
             <option>产品解说</option><option>数字人口播</option><option>情感语录</option>
             <option>知识科普</option><option>企业宣传</option>
-          </datalist>
+            <option value="__custom__">其它（自定义）</option>
+          </select>
+          <input type="text" id="customTypeInput" placeholder="自定义类型" style="display:none;width:130px;margin-left:6px">
         </label>
         <label class="field">画幅
           <select id="projectAspect"><option>竖版 1080×1920</option><option>横版 1920×1080</option></select>
@@ -813,6 +814,19 @@ function esc(s) {
 function escAttr(s) { return esc(s); }
 
 // ---------- ① 创建项目 ----------
+function currentProjectType() {
+  const v = $('projectType').value;
+  if (v === '__custom__') return ($('customTypeInput').value.trim() || '自定义');
+  return v;
+}
+
+function syncCustomTypeInput() {
+  const show = $('projectType').value === '__custom__';
+  $('customTypeInput').style.display = show ? '' : 'none';
+}
+
+$('projectType').addEventListener('change', syncCustomTypeInput);
+
 async function createProject() {
   const name = $('projectName').value.trim();
   if (!name) { toast('请输入项目名', true); return; }
@@ -824,7 +838,7 @@ async function createProject() {
   // 点击创建项目 = 直接新建，不继承任何旧项目数据
   const payload = {
     name,
-    type: $('projectType').value,
+    type: currentProjectType(),
     aspect: $('projectAspect').value,
     budget: $('projectBudget').value,
     fresh: true,
@@ -937,7 +951,7 @@ function autoSaveProject(silent) {
     try {
       const payload = {
         name: $('projectName').value.trim() || '未命名项目',
-        type: $('projectType').value,
+        type: currentProjectType(),
         aspect: $('projectAspect').value,
         budget: $('projectBudget').value,
         current_script: currentScript,
@@ -1027,7 +1041,7 @@ async function generateScript() {
   try {
     const r = await fetch('/api/generate_script', {
       method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({topic, type: $('projectType').value, style: $('styleInput').value, segments: parseInt($('segmentsInput').value) || 10, lmstudio_token: $('lmToken').value.trim()}),
+      body: JSON.stringify({topic, type: currentProjectType(), style: $('styleInput').value, segments: parseInt($('segmentsInput').value) || 10, lmstudio_token: $('lmToken').value.trim()}),
     });
     const d = await r.json();
     if (!r.ok) { toast(d.error || '生成失败', true); return; }
@@ -2137,7 +2151,18 @@ async function loadProject() {
       currentProjectName = p.name;
       $('projectName').value = p.name;
       $('projectChip').textContent = `${p.name} · ${p.type||''} · ${p.aspect||''}`;
-      if (p.type) $('projectType').value = p.type;
+      if (p.type) {
+        const builtin = [...document.querySelectorAll('#projectType option')].some(o =>
+          o.value === p.type || o.textContent === p.type);
+        if (builtin) {
+          $('projectType').value = p.type;
+          $('customTypeInput').value = '';
+        } else {
+          $('projectType').value = '__custom__';
+          $('customTypeInput').value = p.type;
+        }
+        syncCustomTypeInput();
+      }
       if (p.aspect) $('projectAspect').value = p.aspect;
       if (p.budget) $('projectBudget').value = p.budget;
     }
@@ -3014,6 +3039,8 @@ $('btnCreateProject').addEventListener('click', createProject);
 $('btnNewProject').addEventListener('click', () => {
   $('projectName').value = '';
   $('projectType').value = '青春短剧';
+  $('customTypeInput').value = '';
+  syncCustomTypeInput();
   $('projectAspect').value = '竖版 1080×1920';
   $('projectBudget').value = '1 分钟';
   $('topicInput').value = '';
