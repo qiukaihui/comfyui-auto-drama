@@ -3297,7 +3297,8 @@ def verify_asset(image_path, kind, expected=None, timeout=120):
         else:
             q = (f"你是图片质检员。检查这张角色锚点图，严格只输出 JSON：{{\"ok\": true或false, \"issues\": [\"问题1\", ...]}}\n"
                  f"检查项：1. 人物性别必须是「{gender}」 2. 发型服装必须与设定一字不差一致：{check_look} "
-                 f"3. 画面干净：无多余肢体/多余手指、无重复人物、无文字乱码、无现代物品 4. 面部清晰五官正常。\n"
+                 f"3. 画面干净：无多余肢体/多余手指、无重复人物、无文字乱码、无现代物品 "
+                 f"4. 面部清晰五官正常 5. 画面完整：整张图完整渲染，无大面积空白/灰色色块/未生成区域/半成品拼接。\n"
                  f"若发型或服装与设定不符，必须列为问题（如'服装与设定不符：应为碎花连衣裙，实际是…'）。\n"
                  "ok=true 表示全部通过；否则 ok=false 并列出具体问题。")
     elif kind == "scene":
@@ -3305,7 +3306,8 @@ def verify_asset(image_path, kind, expected=None, timeout=120):
         desc_line = f"1. 场景必须与描述一致：{desc}" if desc else "1. 场景符合「1980年代中国乡村环境」"
         q = ("你是图片质检员。检查这张场景参考图，严格只输出 JSON：{\"ok\": true或false, \"issues\": [...]}\n"
              f"检查项：{desc_line} 2. 画面内无人物 "
-             "3. 无文字乱码 4. 无现代物品（路灯/汽车/塑料/现代包装等）。\n"
+             "3. 无文字乱码 4. 无现代物品（路灯/汽车/塑料/现代包装等） "
+             "5. 画面完整：整张图完整渲染，无大面积空白/灰色色块/未生成区域/半成品拼接。\n"
              "若场景与描述明显不符，必须列为问题。\n"
              "ok=true 表示全部通过；否则 ok=false 并列出具体问题。")
     else:
@@ -3322,7 +3324,8 @@ def verify_asset(image_path, kind, expected=None, timeout=120):
              f"检查项：{people_line} 1. 人物形象：{look} 2. 肢体完整：无多余手指/手臂/腿部异常纹理 "
              "3. 人体结构：每个人的头部与身体必须自然衔接（无错位/拼接感/断头/头身朝向矛盾），"
              "颈部正常不扭曲，姿势符合动作描述，两人互动位置关系合理 "
-             "4. 画面干净：无文字乱码、无重复人物、无现代物品、道具正常（无塑料包装盒/饮料瓶）。\n"
+             "4. 画面干净：无文字乱码、无重复人物、无现代物品、道具正常（无塑料包装盒/饮料瓶） "
+             "5. 画面完整：整张图完整渲染，无大面积空白/灰色色块/未生成区域/半成品拼接。\n"
              "ok=true 表示全部通过；否则 ok=false 并列出具体问题。")
     try:
         content = vision_ask(image_path, q, timeout)
@@ -3347,6 +3350,43 @@ def verify_asset(image_path, kind, expected=None, timeout=120):
 _ASSET_TAG = {"role": "锚点", "scene": "场景", "story": "分镜"}
 
 
+def _has_big_gray_block(path, gray_ratio=0.22):
+    """确定性检测：画面是否存在大片纯灰/未生成区域（如"一半灰一半出图"）。
+    纯灰块 = 颜色接近中性灰(r≈g≈b) + 亮度在中间带 + 局部几乎无细节。
+    返回 (是否命中, 灰块占比)。检测失败返回 (False, 0)。
+    """
+    try:
+        from PIL import Image
+        img = Image.open(path).convert("RGB").resize((64, 64))
+        px = img.load()
+        w, h = img.size
+        flat = 0
+        total = w * h
+        for y in range(h):
+            for x in range(w):
+                r, g, b = px[x, y]
+                ch_std = (abs(r - g) + abs(g - b) + abs(r - b)) / 3.0
+                mean = (r + g + b) / 3.0
+                if ch_std > 18 or not (90 <= mean <= 175):
+                    continue
+                diff = 0
+                n = 0
+                if x + 1 < w:
+                    rr, gg, bb = px[x + 1, y]
+                    diff += abs(r - rr) + abs(g - gg) + abs(b - bb)
+                    n += 1
+                if y + 1 < h:
+                    rr, gg, bb = px[x, y + 1]
+                    diff += abs(r - rr) + abs(g - gg) + abs(b - bb)
+                    n += 1
+                if n and diff / n < 12:
+                    flat += 1
+        ratio = flat / total
+        return ratio > gray_ratio, ratio
+    except Exception:
+        return False, 0.0
+
+
 def _gen_asset_file(kind, key, prompt, expected=None, view=None, refs=None, mode=None):
     """生图 + 质检（最多 3 次，每次随机 seed 出新图）。返回 (filename, verified, issues, attempts)。"""
     expected = dict(expected or {})
@@ -3364,6 +3404,12 @@ def _gen_asset_file(kind, key, prompt, expected=None, view=None, refs=None, mode
             refs=refs, mode=mode, people=(expected or {}).get("people_count"),
         )
         attempts += 1
+        # 确定性硬检查：大片纯灰/未生成区域直接判不过（视觉模型会当成暗角放过）
+        big_gray, gray_ratio = _has_big_gray_block(dest)
+        if big_gray:
+            last_fn, last_issues = fn, [f"画面存在大面积灰色/未生成区域（占比 {gray_ratio:.0%}），判不通过"]
+            time.sleep(1)
+            continue
         v = verify_asset(dest, kind, expected)
         last_fn, last_issues = fn, v.get("issues", [])
         if v.get("ok"):
