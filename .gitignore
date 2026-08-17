@@ -39,3 +39,6 @@ workflows/__pycache__/
 # ---- 系统 ----
 .DS_Store
 Thumbs.db
+
+# 本地写作产物（不提交）
+写作/
