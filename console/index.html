@@ -807,6 +807,10 @@ async function createProject() {
   const name = $('projectName').value.trim();
   if (!name) { toast('请输入项目名', true); return; }
   if (projectNames.has(name)) { toast(`项目名「${name}」已存在，请换一个`, true); return; }
+  // 新项目不继承上一项目的剧本输入（题材/风格/段数）
+  $('topicInput').value = '';
+  $('styleInput').value = '怀旧温情，1980s 中国乡村校园';
+  $('segmentsInput').value = 10;
   // 点击创建项目 = 直接新建，不继承任何旧项目数据
   const payload = {
     name,
@@ -3002,6 +3006,9 @@ $('btnNewProject').addEventListener('click', () => {
   $('projectType').value = '青春短剧';
   $('projectAspect').value = '竖版 1080×1920';
   $('projectBudget').value = '1 分钟';
+  $('topicInput').value = '';
+  $('styleInput').value = '怀旧温情，1980s 中国乡村校园';
+  $('segmentsInput').value = 10;
   resetWorkData();
   $('btnToScript').style.display = 'none';
   $('projectHint').textContent = '已新建空白项目，输入项目名后点「创建项目」';
