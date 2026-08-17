@@ -3421,7 +3421,7 @@ def _gen_asset_file(kind, key, prompt, expected=None, view=None, refs=None, mode
     return last_fn, False, last_issues, attempts
 
 
-def _register_asset(kind, key, filename, view=None, meta=None):
+def _register_asset(kind, key, filename, view=None, meta=None, shot=None):
     """把生成结果登记进项目状态并立即保存（角色/场景/分镜/四视图）。"""
     st = load_state()
     proj = dict(st.get("project") or {})
@@ -3439,7 +3439,11 @@ def _register_asset(kind, key, filename, view=None, meta=None):
         ai.setdefault("scene", {})[str(key)] = filename
         ast.setdefault("scenes", {}).setdefault(str(key), {})["reference"] = filename
     else:
-        ai.setdefault("story", {})[str(key)] = filename
+        # 分镜支持一段多拍：storyShots 存全部拍，story 存第 1 拍（向后兼容主引用）
+        shot_no = int(shot) if shot else 1
+        ai.setdefault("storyShots", {}).setdefault(str(key), {})[str(shot_no)] = filename
+        if shot_no == 1:
+            ai.setdefault("story", {})[str(key)] = filename
     am.setdefault(kind, {})[str(key)] = meta or {"verified": False, "issues": [], "attempts": 1}
     proj["asset_imgs"] = ai
     proj["asset_meta"] = am
@@ -3523,13 +3527,14 @@ def start_assets_batch_job(items):
                 try:
                     refs = item.get("refs")
                     mode = item.get("mode")
+                    shot = item.get("shot")
                     if kind == "story":
                         if not refs:
                             refs = _story_refs(proj, key)
                         if not mode:
                             mode = story_mode
                     fn, ok, issues, attempts = _gen_asset_file(kind, key, prompt, expected, view, refs, mode)
-                    _register_asset(kind, key, fn, view, {"verified": ok, "issues": issues, "attempts": attempts})
+                    _register_asset(kind, key, fn, view, {"verified": ok, "issues": issues, "attempts": attempts}, shot)
                 except Exception as e:
                     print(f"[assets] {label} 失败：{e}", flush=True)
                     job["error"] = f"{label} 失败：{e}"

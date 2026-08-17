@@ -386,6 +386,9 @@
         <h3 style="font-size:14px;margin:0">🎬 分镜图（每段故事板）</h3>
         <span style="flex:1"></span>
         <button class="btn" style="padding:3px 10px;font-size:11px" onclick="genStoryboards()">⚡ 一键生成分镜图</button>
+        <label style="font-size:12px;color:var(--muted);margin:0 8px">每段拍数
+          <input type="number" id="storyShotsCount" value="3" min="1" max="5" style="width:52px">
+        </label>
         <button class="btn" style="padding:3px 10px;font-size:11px;color:var(--red)" onclick="clearAssetsByKind('story')">🧹 清空分镜图</button>
       </div>
       <label style="font-size:12px;color:var(--muted);margin-bottom:10px;display:inline-block">
@@ -862,7 +865,7 @@ function resetWorkData() {
   scriptAfter = null;
   currentScript = null;
   promptTasks = [];
-  assetImgs = {role: {}, scene: {}, story: {}};
+  assetImgs = {role: {}, scene: {}, story: {}, storyShots: {}};
   assetPrompts = {role: {}, scene: {}, story: {}};
   assetMeta = {role: {}, scene: {}, story: {}};
   sceneNames = [];
@@ -2148,7 +2151,7 @@ async function loadProject() {
     const d = await r.json();
     const p = d.project || {};
     // 每次加载项目先清空资产状态，防止上一个项目（或共享素材扫描）的图片残留
-    assetImgs = {role: {}, scene: {}, story: {}};
+    assetImgs = {role: {}, scene: {}, story: {}, storyShots: {}};
     assetPrompts = {role: {}, scene: {}, story: {}};
     assetMeta = {role: {}, scene: {}, story: {}};
     assetState = {role: {}, scene: {}, story: {}};
@@ -2242,7 +2245,7 @@ function applyProjectSelections() {
 }
 
 // ---------- ⑤ 参考资产 ----------
-let assetImgs = {role: {}, scene: {}, story: {}};
+let assetImgs = {role: {}, scene: {}, story: {}, storyShots: {}};
 let assetPrompts = {role: {}, scene: {}, story: {}};
 let assetMeta = {role: {}, scene: {}, story: {}};
 let assetState = {roles: {}, scenes: {}};   // 资产状态表：身份/发型/服装/参考图/批准
@@ -2319,17 +2322,31 @@ function renderAssets() {
 
   const sb = (currentScript && currentScript.storyboard_list) || [];
   $('storyAssets').innerHTML = sb.map((s, i) => {
-    const img = assetImgs.story[i] || '';
-    const prompt = assetPrompts.story[i] || defaultStoryPrompt(i);
+    const shotsObj = (assetImgs.storyShots && assetImgs.storyShots[i])
+      || (assetImgs.story[i] ? {1: assetImgs.story[i]} : {});
+    const shotCount = Math.max(1, Object.keys(shotsObj).length,
+      parseInt($('storyShotsCount') ? $('storyShotsCount').value : '3') || 1);
+    const shotImgs = [];
+    for (let sn = 1; sn <= shotCount; sn++) {
+      const img = shotsObj[sn] || '';
+      shotImgs.push(`<div style="position:relative">
+        <img src="${img ? '/media/' + encodeURIComponent(img) : ''}" style="width:100%;aspect-ratio:3/4;object-fit:cover;border-radius:8px;border:1px solid var(--line);background:#f1f4f9;display:${img ? 'block':'none'}">
+        <span style="position:absolute;left:6px;top:6px;background:rgba(0,0,0,.55);color:#fff;font-size:11px;padding:2px 6px;border-radius:4px">拍 ${sn}</span>
+      </div>`);
+    }
+    const prompt = assetPrompts.story[i] || defaultStoryPrompt(i, 1);
     return `<div class="card-item">
       <div class="r1"><span class="name">分镜 ${i + 1} · ${esc(s.scene || '')}</span>${verifyBadge('story', i)}</div>
-      <img src="${img ? '/media/' + encodeURIComponent(img) : ''}" style="width:100%;aspect-ratio:3/4;object-fit:cover;border-radius:8px;border:1px solid var(--line);background:#f1f4f9;display:${img ? 'block':'none'}">
-      <details style="margin-top:8px"><summary style="font-size:12px;color:var(--muted);cursor:pointer">📝 提示词（可编辑）</summary>
+      ${shotImgs.join('') || '<div class="empty" style="grid-column:1/-1;padding:18px">还没有分镜图</div>'}
+      <details style="margin-top:8px"><summary style="font-size:12px;color:var(--muted);cursor:pointer">📝 拍1 提示词（可编辑）</summary>
         <textarea class="asset-prompt" data-kind="story" data-key="${i}" rows="4" style="width:100%;font-size:11px;margin-top:6px">${esc(prompt)}</textarea>
       </details>
-      <div class="row" style="margin-top:8px">
-        <button class="btn" onclick="genStoryImg(${i})">${img ? '🔄 重新生成' : '🎬 生成分镜图'}</button>
-        <button class="btn" onclick="openPromptModal('story', ${i})">💬 对话修改</button>
+      <div class="row" style="margin-top:8px;flex-wrap:wrap">
+        ${Array.from({length: shotCount}, (_, k) => {
+          const sn = k + 1;
+          return `<button class="btn" style="padding:3px 8px;font-size:11px" onclick="genStoryImg(${i}, ${sn})">${shotsObj[sn] ? '🔄' : '🎬'} 拍${sn}</button>`;
+        }).join('')}
+        <button class="btn" style="padding:3px 8px;font-size:11px" onclick="openPromptModal('story', ${i})">💬 改提示词</button>
       </div>
     </div>`;
   }).join('') || '<div class="empty" style="grid-column:1/-1">剧本还没有分镜</div>';
@@ -2493,14 +2510,19 @@ function projectEraZh() {
   return /城市|都市|信号站|高楼|霓虹|直升机|工厂|学校|现代|洪水/.test(text) ? '现代中国城市' : '1980年代中国乡村';
 }
 
-function defaultStoryPrompt(i) {
-  // 中文分镜提示词：直接用剧本的中文要素（场景/动作/对白/情绪）
+function defaultStoryPrompt(i, shotIdx) {
+  // 中文分镜提示词：按"拍"取单拍定格瞬间（不再把整段动作塞进一张图）
+  shotIdx = shotIdx || 1;
   const s = (currentScript.storyboard_list || [])[i] || {};
   const parts = [];
   // 场景描述优先用资产状态表（与文字提示词同一来源，保证生图/出片一致）
   const scDesc = (assetState.scenes && assetState.scenes[s.scene] && assetState.scenes[s.scene].desc) || s.scene || '';
   if (scDesc) parts.push(`场景：${scDesc}`);
-  if (s.action) parts.push(`动作：${s.action}`);
+  // 单拍定格：把动作按 ；切分，取第 shotIdx 句作为这一拍；没有就取整段
+  const clauses = String(s.action || '').split(/[；;。]/).map(x => x.trim()).filter(Boolean);
+  const beat = clauses[shotIdx - 1] || clauses[0] || s.action || '';
+  parts.push(`这一拍（定格瞬间）：${beat}`);
+  if (s.camera) parts.push(`机位：${s.camera}`);
   if (s.dialogue) parts.push(`对白：${s.dialogue}`);
   if (s.emotion) parts.push(`情绪：${s.emotion}`);
   const p = parts.join('。') + '。';
@@ -2525,6 +2547,7 @@ function defaultStoryPrompt(i) {
     + `两人身体轮廓清晰可分离，不得交叠成额外肢体；没有多余的肢体/手臂/手从画面外伸入，`
     + `每人四肢完整、各两只手、手指清晰不粘连，`
     + `两人的头部与身体必须自然衔接（无错位/拼接感/头身朝向矛盾），颈部正常，姿态符合动作描述；`
+    + `画面定格在这一瞬间，动作姿态有张力、符合人体力学，光影氛围符合"${beat.slice(0, 20)}"；`
     + `构图策略：双人同框中近景，两人占据画面主体（约七成以上面积），机位贴近两人；`
     + `背景为干净虚化的墙面或床帘暗角，禁止出现门口、窗户、镜子、走廊、反光面或任何能容纳第三人的背景空间；`
     + `服装道具正常无穿帮，无文字乱码，无重复人物，无塑料包装盒，无饮料瓶`
@@ -2639,11 +2662,14 @@ async function genSceneImg(i) {
   finally { btn.disabled = false; btn.textContent = '🖼️ 生成'; }
 }
 
-async function genStoryImg(i) {
+async function genStoryImg(i, shotIdx) {
+  shotIdx = shotIdx || 1;
   const ta = document.querySelector(`.asset-prompt[data-kind="story"][data-key="${i}"]`);
-  let prompt = (ta && ta.value.trim()) || defaultStoryPrompt(i);
-  // AI 按剧情生成规范提示词（用户手动编辑过的不覆盖）
-  if ($('storyAiPrompt').checked && !(ta && ta.value.trim())) {
+  let prompt = shotIdx === 1
+    ? ((ta && ta.value.trim()) || assetPrompts.story[i] || defaultStoryPrompt(i, 1))
+    : defaultStoryPrompt(i, shotIdx);
+  // 拍1：AI 按剧情生成规范提示词（用户手动编辑过的不覆盖）
+  if (shotIdx === 1 && $('storyAiPrompt').checked && !(ta && ta.value.trim())) {
     toastLoading(`🤖 AI 正在按剧情生成分镜 ${i + 1} 提示词（约 20-40 秒）…`);
     try {
       const sb = (currentScript.storyboard_list || [])[i] || {};
@@ -2663,16 +2689,20 @@ async function genStoryImg(i) {
       }
     } catch (e) { /* AI 失败回退规则模板 */ }
   }
-  assetPrompts.story[i] = prompt;
+  if (shotIdx === 1) assetPrompts.story[i] = prompt;
   const btn = event.target; btn.disabled = true; btn.textContent = '生成中…';
-  toastLoading(`🎬 正在生成分镜 ${i + 1} 图（约 10-30 秒）…`);
+  toastLoading(`🎬 正在生成分镜 ${i + 1} 拍${shotIdx}（约 10-30 秒）…`);
   try {
-    assetImgs.story[i] = await genAsset('story', `s${i + 1}`, prompt, '分镜');
+    const fn = await genAsset('story', `s${i + 1}`, prompt, '分镜');
+    assetImgs.storyShots = assetImgs.storyShots || {};
+    assetImgs.storyShots[i] = assetImgs.storyShots[i] || {};
+    assetImgs.storyShots[i][shotIdx] = fn;
+    if (shotIdx === 1) assetImgs.story[i] = fn;
     renderAssets();
     autoSaveProject(true);
-    toast(`✅ 分镜 ${i + 1} 图已生成`);
+    toast(`✅ 分镜 ${i + 1} 拍${shotIdx} 已生成`);
   } catch (e) { toast(e.message, true); }
-  finally { btn.disabled = false; btn.textContent = '🎬 生成分镜图'; }
+  finally { if (btn) { btn.disabled = false; btn.textContent = `🔄 拍${shotIdx}`; } }
 }
 
 function setRoleGender(i, g) {
@@ -2763,7 +2793,7 @@ async function genAllAssets() {
   const viewZh = {front: '正面', face: '脸部', side: '侧面', back: '背面'};
   // 收集待生成清单（只生成缺失的，支持断点续跑），交给服务端后台批量生成
   const items = [];
-  const pushItem = (kind, key, prompt, view, expected, label) => items.push({kind, key, prompt, view, expected, label});
+  const pushItem = (kind, key, prompt, view, expected, label, shot) => items.push({kind, key, shot, prompt, view, expected, label});
   roles.forEach((r, i) => {
     const name = r.role_name || r.name;
     ['front', 'face', 'side', 'back'].forEach(v => {
@@ -2788,9 +2818,12 @@ async function genAllAssets() {
     pushItem('scene', sc, prompt, null, {desc: (assetState.scenes[sc] || {}).desc || prompt.slice(0, 140)}, `场景「${sc}」`);
   });
   sb.forEach((s, i) => {
-    if (assetImgs.story[i]) return;
-    const prompt = defaultStoryPrompt(i);
-    pushItem('story', i, prompt, null, {look: prompt.slice(0, 160), people_count: Math.max((s.roles || []).length, 1)}, `分镜 ${i + 1}`);
+    const shots = Math.max(1, Math.min(5, parseInt($('storyShotsCount') ? $('storyShotsCount').value : '3') || 1));
+    for (let sn = 1; sn <= shots; sn++) {
+      if (assetImgs.storyShots && assetImgs.storyShots[i] && assetImgs.storyShots[i][sn]) continue;
+      const prompt = defaultStoryPrompt(i, sn);
+      pushItem('story', i, prompt, null, {look: prompt.slice(0, 160), people_count: Math.max((s.roles || []).length, 1)}, `分镜 ${i + 1} 拍${sn}`, sn);
+    }
   });
   const total = items.length;
   if (!total) { toast('没有可生成的资产', true); return; }
@@ -2817,14 +2850,17 @@ function genStoryboards() {
   if (!currentScript) { toast('请先生成剧本', true); return; }
   const sb = currentScript.storyboard_list || [];
   const items = [];
+  const shots = Math.max(1, Math.min(5, parseInt($('storyShotsCount') ? $('storyShotsCount').value : '3') || 1));
   sb.forEach((s, i) => {
-    if (assetImgs.story[i]) return;
-    const prompt = defaultStoryPrompt(i);
-    items.push({
-      kind: 'story', key: i, prompt, view: null,
-      expected: {look: prompt.slice(0, 160), people_count: Math.max((s.roles || []).length, 1)},
-      label: `分镜 ${i + 1}`,
-    });
+    for (let sn = 1; sn <= shots; sn++) {
+      if (assetImgs.storyShots && assetImgs.storyShots[i] && assetImgs.storyShots[i][sn]) continue;
+      const prompt = defaultStoryPrompt(i, sn);
+      items.push({
+        kind: 'story', key: i, shot: sn, prompt, view: null,
+        expected: {look: prompt.slice(0, 160), people_count: Math.max((s.roles || []).length, 1)},
+        label: `分镜 ${i + 1} 拍${sn}`,
+      });
+    }
   });
   if (!items.length) { toast('分镜图已全部生成', true); return; }
   startAssetsBatch(items);
@@ -2926,6 +2962,7 @@ function clearAssetsByKind(kind) {
       });
     } else {
       assetImgs.story = {};
+      assetImgs.storyShots = {};
       assetPrompts.story = {};
     }
     assetMeta[kind] = {};
