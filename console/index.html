@@ -295,7 +295,7 @@
       </label>
       <div class="grid">
         <label class="field">风格
-          <input type="text" id="styleInput" value="怀旧温情，1980s 中国乡村校园">
+          <input type="text" id="styleInput" placeholder="如：硬朗写实 / 赛博朋克 / 清新治愈（留空则跟随题材）">
         </label>
         <label class="field">段数
           <input type="number" id="segmentsInput" value="10" min="3" max="20">
@@ -833,7 +833,7 @@ async function createProject() {
   if (projectNames.has(name)) { toast(`项目名「${name}」已存在，请换一个`, true); return; }
   // 新项目不继承上一项目的剧本输入（题材/风格/段数）
   $('topicInput').value = '';
-  $('styleInput').value = '怀旧温情，1980s 中国乡村校园';
+  $('styleInput').value = '';
   $('segmentsInput').value = 10;
   // 点击创建项目 = 直接新建，不继承任何旧项目数据
   const payload = {
@@ -3044,7 +3044,7 @@ $('btnNewProject').addEventListener('click', () => {
   $('projectAspect').value = '竖版 1080×1920';
   $('projectBudget').value = '1 分钟';
   $('topicInput').value = '';
-  $('styleInput').value = '怀旧温情，1980s 中国乡村校园';
+  $('styleInput').value = '';
   $('segmentsInput').value = 10;
   resetWorkData();
   $('btnToScript').style.display = 'none';

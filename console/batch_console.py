@@ -2282,7 +2282,8 @@ H3_POLISH_SYSTEM = """你是资深短视频编剧兼 MiniMax H3 视频模型提�
 不要输出任何其他文字、解释或 markdown 代码块标记。"""
 
 
-SCRIPT_GEN_SYSTEM = """你是资深短剧编剧，擅长 1980s 中国乡村/校园题材的细腻叙事。
+SCRIPT_GEN_SYSTEM = """你是资深短剧编剧，擅长各类短剧题材（都市/动作/悬疑/情感/年代等），
+年代与场景基调严格跟随用户的题材与风格要求。
 任务：根据用户提供的题材、梗概和风格要求，创作一部可逐段拍摄的短剧剧本。
 
 剧本结构必须输出 JSON：
@@ -2569,7 +2570,7 @@ def llm_generate_script(topic, style="", segments=10, token="", genre=""):
     user = (
         f"题材/梗概：{topic or ''}\n"
         + (f"内容类型：{genre}\n" if str(genre or "").strip() else "")
-        + f"风格要求：{style or '怀旧温情、1980s 中国乡村校园'}\n"
+        + (f"风格要求：{style}\n" if str(style or "").strip() else "")
         + f"段数：{segments} 段左右\n"
         + "请创作完整剧本 JSON。"
     )
