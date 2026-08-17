@@ -3233,7 +3233,7 @@ def vision_ask(image_path, prompt, timeout=120):
     """调本地视觉服务（OpenAI 兼容，图片 base64）→ 返回文本。"""
     cfg = _vision_config()
     base = cfg.get("DASHSCOPE_BASE_URL", "http://127.0.0.1:8001/v1")
-    model = cfg.get("VISION_MODEL", "Qwen3.6-35B-A3B-4bit")
+    model = cfg.get("VISION_MODEL", "Qwen3.6-35B-A3B-8bit")
     key = cfg.get("DASHSCOPE_API_KEY", "")
     with open(image_path, "rb") as f:
         b64 = base64.b64encode(f.read()).decode()
