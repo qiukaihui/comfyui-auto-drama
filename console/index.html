@@ -869,9 +869,30 @@ async function renderProjects() {
         </div>
         <div class="proj-actions">
           <button class="btn ghost" onclick="continueProject('${escAttr(p.name)}', ${Math.min((p.progress || 0) + 2, 8)})">继续 →</button>
+          <button class="btn ghost" style="padding:3px 10px;font-size:11px;color:var(--red)" onclick="deleteProject('${escAttr(p.name)}')">🗑️ 删除</button>
         </div>
       </div>`).join('');
   } catch (e) { box.innerHTML = '<div class="empty">项目列表加载失败</div>'; }
+}
+
+async function deleteProject(name) {
+  askConfirm(`确定删除项目「${name}」吗？\n将删除该项目的全部内容：剧本 / 提示词 / 参考图 / 生成视频 / 任务记录。\n（文件会移入 素材/_trash_xxx/，可恢复；任务记录不可恢复）`, async () => {
+    try {
+      const r = await fetch('/api/project_delete', {
+        method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({name}),
+      });
+      const d = await r.json();
+      if (!r.ok) { toast(d.error || '删除失败', true); return; }
+      if (name === currentProjectName) {
+        currentProjectName = '';
+        resetWorkData();
+        $('projectChip').textContent = '未创建项目';
+        $('btnToScript').style.display = 'none';
+      }
+      await renderProjects();
+      toast(`✅ 已删除项目「${name}」（${d.files_moved || 0} 个文件移入回收目录）`);
+    } catch (e) { toast('删除失败：' + e.message, true); }
+  });
 }
 
 async function continueProject(name, step) {

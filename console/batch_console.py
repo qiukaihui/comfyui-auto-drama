@@ -342,6 +342,100 @@ def list_images():
     return found
 
 
+def _move_to_trash(src_path, trash, moved, suffix=0):
+    """把文件移入项目回收目录（同名冲突加序号），返回目标路径或 None。"""
+    if not src_path or not os.path.isfile(src_path):
+        return None
+    base = os.path.basename(src_path)
+    dst = os.path.join(trash, base)
+    if os.path.exists(dst):
+        stem, ext = os.path.splitext(base)
+        dst = os.path.join(trash, f"{stem}_{suffix}{ext}")
+    if os.path.abspath(src_path) == os.path.abspath(dst):
+        return None
+    shutil.move(src_path, dst)
+    moved.append(os.path.basename(dst))
+    return dst
+
+
+def delete_project_all(name):
+    """删除项目全部内容：状态记录、任务、参考图资产、生成视频。
+    文件统一移入 素材/_trash_<项目名>_<时间戳>/（可恢复），不永久删除。
+    返回 {deleted, files_moved, trash_dir}。
+    """
+    name = str(name or "").strip()
+    st = load_state()
+    projects = st.get("projects") or {}
+    cur = dict(st.get("project") or {})
+    cur_name = str(cur.get("name") or "")
+    if name not in projects and cur_name != name:
+        raise ValueError(f"项目「{name}」不存在")
+    proj = projects.get(name) or (cur if cur_name == name else {})
+    if not proj:
+        raise ValueError(f"项目「{name}」没有数据")
+
+    # 任务名集合：提示词任务名（去掉 _NN 版本尾巴）+ 已提交名 + 项目名
+    task_names = {name}
+    for t in (proj.get("prompt_tasks") or []):
+        n = str(t.get("name") or "").strip()
+        if n:
+            task_names.add(n)
+            task_names.add(re.sub(r"_v?\d+$", "", n))
+    for n in (proj.get("submitted_task_names") or []):
+        task_names.add(str(n))
+
+    trash = os.path.join(IMAGE_DIRS[0], f"_trash_{name}_{int(time.time())}")
+    os.makedirs(trash, exist_ok=True)
+    moved = []
+
+    # 1) 参考图资产（角色视图/场景/分镜）
+    ai = proj.get("asset_imgs") or {}
+    for grp in ("role", "scene", "story"):
+        for v in (ai.get(grp) or {}).values():
+            _move_to_trash(find_image(v), trash, moved)
+    for rv in (ai.get("roleViews") or {}).values():
+        for v in (rv or {}).values():
+            _move_to_trash(find_image(v), trash, moved)
+
+    # 2) 任务输出视频（已下载到 outputs 目录的）
+    for t in st.get("tasks") or []:
+        n = str(t.get("name") or "")
+        if not (n in task_names or any(n.startswith(p + "_") for p in task_names)):
+            continue
+        of = t.get("output_file") or {}
+        fn = of.get("filename") or of.get("file") or ""
+        if fn:
+            for base in (OUTPUTS_DIR, IMAGE_DIRS[0]):
+                _move_to_trash(os.path.join(base, fn), trash, moved)
+
+    # 3) 合成成片（素材/合成_<项目名或剧本标题>_*.mp4）
+    title = str(((proj.get("current_script") or {}).get("title") or "").strip("《》 "))
+    for pat in filter(None, (f"合成_{name}_", title and f"合成_{title}_")):
+        for d in IMAGE_DIRS:
+            if not os.path.isdir(d):
+                continue
+            for fn in os.listdir(d):
+                if fn.startswith(pat) and fn.lower().endswith(".mp4"):
+                    _move_to_trash(os.path.join(d, fn), trash, moved)
+
+    # 4) 状态清理
+    projects.pop(name, None)
+    st["projects"] = projects
+    if cur_name == name:
+        # save_state 遇到 None 值才删除对应数据库行（pop 只删内存）
+        for k in ("project", "role_images", "scene_image", "expand_task", "assets_gen_task"):
+            st[k] = None
+    st["tasks"] = [
+        t for t in (st.get("tasks") or [])
+        if not (
+            str(t.get("name") or "") in task_names
+            or any(str(t.get("name") or "").startswith(p + "_") for p in task_names)
+        )
+    ]
+    save_state(st)
+    return {"deleted": name, "files_moved": len(moved), "trash_dir": trash}
+
+
 def list_media():
     """列出素材目录里的视频/音频文件（参考视频用）。排除合成成片（合成_*），避免误当参考。"""
     found = []
@@ -4833,6 +4927,18 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(400, json.dumps({"error": f"剧本转换失败：{e}"}, ensure_ascii=False))
                 return
             self._send(200, json.dumps({"script": script}, ensure_ascii=False))
+            return
+        if path == "/api/project_delete":
+            name = str(body.get("name") or "").strip()
+            if not name:
+                self._send(400, json.dumps({"error": "缺少项目名"}, ensure_ascii=False))
+                return
+            try:
+                res = delete_project_all(name)
+            except ValueError as e:
+                self._send(404, json.dumps({"error": str(e)}, ensure_ascii=False))
+                return
+            self._send(200, json.dumps(res, ensure_ascii=False))
             return
         if path == "/api/project":
             st = load_state()
