@@ -4966,11 +4966,28 @@ class Handler(BaseHTTPRequestHandler):
                     if new_name in projects:
                         self._send(400, json.dumps({"error": f"项目名「{new_name}」已存在，请换一个"}, ensure_ascii=False))
                         return
-                    proj = {"name": new_name}  # 明确新建：不继承旧工作数据
+                    # 明确新建：不继承旧工作数据，且资产/提示词容器必须初始化（防止前端扫到老项目共享文件）
+                    proj = {
+                        "name": new_name,
+                        "prompt_tasks": [],
+                        "asset_imgs": {"role": {}, "scene": {}, "story": {}},
+                        "asset_prompts": {"role": {}, "scene": {}, "story": {}},
+                        "asset_meta": {"role": {}, "scene": {}, "story": {}},
+                        "asset_state": {},
+                        "generation_log": [],
+                    }
                 elif new_name != old_name and new_name in projects:
                     proj = dict(projects[new_name])  # 切回已存在项目
                 elif new_name != old_name:
-                    proj = {"name": new_name}  # 新名字：空项目
+                    proj = {
+                        "name": new_name,  # 新名字：空项目（同样初始化空容器）
+                        "prompt_tasks": [],
+                        "asset_imgs": {"role": {}, "scene": {}, "story": {}},
+                        "asset_prompts": {"role": {}, "scene": {}, "story": {}},
+                        "asset_meta": {"role": {}, "scene": {}, "story": {}},
+                        "asset_state": {},
+                        "generation_log": [],
+                    }
                 else:
                     proj = cur
                 for k in ("name", "type", "aspect", "budget"):

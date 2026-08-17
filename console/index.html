@@ -2147,6 +2147,13 @@ async function loadProject() {
     const r = await fetch('/api/project', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({})});
     const d = await r.json();
     const p = d.project || {};
+    // 每次加载项目先清空资产状态，防止上一个项目（或共享素材扫描）的图片残留
+    assetImgs = {role: {}, scene: {}, story: {}};
+    assetPrompts = {role: {}, scene: {}, story: {}};
+    assetMeta = {role: {}, scene: {}, story: {}};
+    assetState = {role: {}, scene: {}, story: {}};
+    sceneNames = [];
+    generationLog = [];
     if (p.name) {
       currentProjectName = p.name;
       $('projectName').value = p.name;
@@ -2194,8 +2201,9 @@ async function loadProject() {
     if (p.asset_meta) assetMeta = p.asset_meta;
     if (p.asset_state) assetState = p.asset_state;
     if (p.generation_log) generationLog = p.generation_log;
-    // 项目没存资产映射（旧版 bug）→ 扫描素材目录按命名规律自动恢复
-    if (!assetImgs.role || !Object.keys(assetImgs.role).length) {
+    // 项目没存资产映射（旧版 bug）→ 扫描素材目录按命名规律自动恢复；
+    // 仅当项目数据里完全没有 asset_imgs 键时才触发（新项目已初始化空容器，不触发）
+    if (p.asset_imgs === undefined && (!assetImgs.role || !Object.keys(assetImgs.role).length)) {
       try {
         const r2 = await fetch('/api/scan_assets');
         const d2 = await r2.json();
