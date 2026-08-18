@@ -2846,6 +2846,7 @@ function renderAssets() {
           <img src="${img ? '/media/' + encodeURIComponent(img) : ''}" onclick="${img ? `zoomImg('/media/${encodeURIComponent(img)}')` : ''}" style="width:64px;height:85px;object-fit:cover;border-radius:6px;border:1px solid var(--line);background:#f1f4f9;display:${img ? 'block':'none'}${img ? ';cursor:zoom-in' : ''}">
           <span style="font-size:12px;font-weight:600">拍 ${sn}</span>
           <button class="btn" style="padding:3px 8px;font-size:11px" onclick="genStoryImg(${i}, ${sn})" ${busy ? 'disabled' : ''}>${busy ? '生成中…' : (img ? '🔄 重新生成' : '🎬 生成')}</button>
+          <button class="btn" style="padding:3px 8px;font-size:11px" onclick="regenStoryPrompt(${i}, ${sn})" title="严格按第 4 步规范提示词重新生成本拍提示词（不重新出图）">🔁 重新生成提示词</button>
         </div>
         <div style="display:flex;align-items:center;gap:6px;margin-top:6px;flex-wrap:wrap">
           <span style="font-size:11px;color:var(--muted)">参考图</span>
@@ -3490,6 +3491,40 @@ async function genStoryImg(i, shotIdx) {
     delete storyGenBusy[busyKey];
     if (btn) { btn.disabled = false; btn.textContent = `🔄 拍${shotIdx}`; }
     renderAssets();
+  }
+}
+
+async function regenStoryPrompt(i, sn) {
+  // 严格按第 4 步规范提示词重新生成本拍提示词（不重新出图）
+  const h3 = h3PromptOf(i);
+  if (!h3) { toast('第 4 步还没有本段规范提示词，请先生成 H3 规范提示词', true); return; }
+  const sb = Object.assign({}, (currentScript.storyboard_list || [])[i] || {});
+  sb.roles = (sb.roles || []).filter(rn => !isVoiceOnlyRole({role_name: rn}));
+  const roles = ((currentScript.role_list || [])).map(r => ({
+    name: r.role_name || r.name,
+    desc: r.role_desc || '',
+    anchor_prompt: assetPrompts.role[r.role_name || r.name] || '',
+  })).filter(r => !isVoiceOnlyRole(r));
+  try {
+    toastLoading(`🔁 正在按第 4 步规范提示词重生成 分镜 ${i + 1} 拍${sn}（约 20-40 秒）…`);
+    const r = await fetch('/api/story_prompt', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({storyboard: sb, roles, h3_prompt: h3, shot: sn,
+                            shots_total: storyShotsTotal(), lmstudio_token: $('lmToken').value.trim()}),
+    });
+    const d = await r.json();
+    if (!r.ok || !d.prompt) throw new Error(d.error || '生成失败');
+    assetPrompts.storyShots = assetPrompts.storyShots || {};
+    assetPrompts.storyShots[i] = assetPrompts.storyShots[i] || {};
+    assetPrompts.storyShots[i][sn] = String(d.prompt).trim();
+    if (sn === 1) assetPrompts.story[i] = String(d.prompt).trim();
+    const ta = document.querySelector(`.shot-prompt[data-seg="${i}"][data-shot="${sn}"]`);
+    if (ta) ta.value = String(d.prompt).trim();
+    toastClear();
+    toast(`✅ 分镜 ${i + 1} 拍${sn} 提示词已按第 4 步规范提示词重生成（图片需点「生成」重出）`);
+    autoSaveProject(true);
+  } catch (e) {
+    toast('重新生成提示词失败：' + e.message, true);
   }
 }
 
