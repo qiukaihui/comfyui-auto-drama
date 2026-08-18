@@ -368,6 +368,7 @@
         <button class="btn" id="btnClearAssets">🧹 清空已生成图</button>
         <button class="btn" id="btnRemakeAssets" title="按第 4 步规范提示词重新填充角色/场景/分镜提示词并重新批量出图（相当于重制）">♻️ 重制全部</button>
         <button class="btn green" id="btnGenAllAssets">⚡ 一键生成全部参考图</button>
+        <button class="btn" id="btnStopAssetsTop" style="color:var(--red)" onclick="stopAssetsNow()" title="停止批量生图（当前这张生成完后不再继续）" disabled>⏹ 停止生成</button>
       </div>
       <div class="hint" style="font-size:11px;line-height:1.7;margin-top:4px">
         🧹 清空 = 只清理不生成：移除图引用并重置提示词，需再点「一键生成」才重新出图。<br>
@@ -2723,7 +2724,7 @@ function isVoiceOnlyRole(r) {
 }
 
 async function syncRoleAppearance() {
-  // 把第 4 步规范提示词的 STRICT 行同步为角色最新形象（appearance），供第 5 步使用
+  // 把第 4 步规范提示词同步为角色形象（appearance）与场景环境（env），供第 5 步使用
   try {
     const r = await fetch('/api/sync_role_appearance', {
       method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}',
@@ -2735,6 +2736,13 @@ async function syncRoleAppearance() {
         assetState.roles[n] = assetState.roles[n] || {};
         assetState.roles[n].appearance = desc;
       });
+      if (d.scenes) {
+        assetState.scenes = assetState.scenes || {};
+        Object.entries(d.scenes).forEach(([n, env]) => {
+          assetState.scenes[n] = assetState.scenes[n] || {};
+          assetState.scenes[n].env = env;
+        });
+      }
       return true;
     }
   } catch (e) { /* 同步失败不影响页面 */ }
@@ -3047,6 +3055,9 @@ function sceneEnvFromDesc(sc) {
   // 正文在第一个"人物指示词"（角色名/他/她/两人/学生等）处截断，再按标点切句、
   // 丢弃仍含人物词的从句与截断产生的半句，得到 时间+地点+陈设 的环境句
   const st = (assetState.scenes && assetState.scenes[sc]) || {};
+  // 优先用第 4 步规范提示词同步的环境（env）：地点+光线氛围，最贴合上一步
+  const envSynced = String(st.env || '').trim();
+  if (envSynced) return envSynced;
   const d = String(st.desc || '');
   if (!d) return '';
   const names = ((currentScript && currentScript.role_list) || []).map(r => r.role_name || r.name).filter(Boolean);
@@ -3184,15 +3195,15 @@ function h3PromptOf(i) {
 
 async function fillStoryShotPrompt(i, sn) {
   // 按最新规则填充分镜图提示词：
-  // 拍1：勾选 AI 且有第 4 步 H3 规范提示词时，用 AI 转单帧分镜图提示词（失败回退模板）；
-  // 拍2+：用 asset_tpl 景别模板（近景/特写等，与拍1 区分）
+  // 每一拍：勾选 AI 且有第 4 步 H3 规范提示词时，用 AI 转单帧分镜图提示词
+  // （按 asset_tpl 景别分配区分拍1/拍2/拍3；失败回退模板）
   const ta = document.querySelector(`.shot-prompt[data-seg="${i}"][data-shot="${sn}"]`);
   const saved = (assetPrompts.storyShots && assetPrompts.storyShots[i] && assetPrompts.storyShots[i][sn])
     || (sn === 1 ? assetPrompts.story[i] : '');
   if (ta && String(ta.value || '').trim()) return ta.value.trim();
   if (saved) return saved;
   const h3 = h3PromptOf(i);
-  if (sn === 1 && $('storyAiPrompt') && $('storyAiPrompt').checked && h3) {
+  if ($('storyAiPrompt') && $('storyAiPrompt').checked && h3) {
     const sb = Object.assign({}, (currentScript.storyboard_list || [])[i] || {});
     sb.roles = (sb.roles || []).filter(rn => !isVoiceOnlyRole({role_name: rn}));
     const roles = ((currentScript.role_list || [])).map(r => ({
@@ -3203,7 +3214,7 @@ async function fillStoryShotPrompt(i, sn) {
     try {
       const r = await fetch('/api/story_prompt', {
         method: 'POST', headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({storyboard: sb, roles, h3_prompt: h3, lmstudio_token: $('lmToken').value.trim()}),
+        body: JSON.stringify({storyboard: sb, roles, h3_prompt: h3, shot: sn, lmstudio_token: $('lmToken').value.trim()}),
       });
       const d = await r.json();
       if (r.ok && d.prompt && String(d.prompt).trim()) return String(d.prompt).trim();
@@ -3424,9 +3435,9 @@ async function genStoryImg(i, shotIdx) {
     const saved = (assetPrompts.storyShots && assetPrompts.storyShots[i] && assetPrompts.storyShots[i][shotIdx])
       || (shotIdx === 1 ? assetPrompts.story[i] : '');
     prompt = (ta && ta.value.trim()) || saved || defaultStoryPrompt(i, shotIdx);
-    // 拍1：AI 按剧情生成规范提示词（仅当没有手动内容和已保存提示词；AI 慢/失败自动回退规则模板）
-    if (shotIdx === 1 && $('storyAiPrompt').checked && !(ta && ta.value.trim()) && !saved) {
-      toastLoading(`🤖 AI 正在按剧情生成分镜 ${i + 1} 提示词（约 20-40 秒）…`);
+    // 每一拍：AI 按剧情生成规范提示词（仅当没有手动内容和已保存提示词；AI 慢/失败自动回退规则模板）
+    if ($('storyAiPrompt').checked && !(ta && ta.value.trim()) && !saved) {
+      toastLoading(`🤖 AI 正在按剧情生成分镜 ${i + 1} 拍${shotIdx} 提示词（约 20-40 秒）…`);
       const sb = Object.assign({}, (currentScript.storyboard_list || [])[i] || {});
       sb.roles = (sb.roles || []).filter(rn => !isVoiceOnlyRole({role_name: rn}));
       const roles = ((currentScript.role_list || [])).map(r => ({
@@ -3437,7 +3448,7 @@ async function genStoryImg(i, shotIdx) {
       try {
         const r = await fetch('/api/story_prompt', {
           method: 'POST', headers: {'Content-Type':'application/json'},
-          body: JSON.stringify({storyboard: sb, roles, h3_prompt: h3PromptOf(i), lmstudio_token: $('lmToken').value.trim()}),
+          body: JSON.stringify({storyboard: sb, roles, h3_prompt: h3PromptOf(i), shot: shotIdx, lmstudio_token: $('lmToken').value.trim()}),
         });
         const d = await r.json();
         if (r.ok && d.prompt) {
@@ -3592,7 +3603,7 @@ async function remakeAssets() {
     rolePreview = {};
     await Promise.all([ensureRefLinkTpl(), ensureAssetTpl()]);
     renderAssets(); // 先重渲染：文本框清空，避免旧值被当作手动内容
-    // 预填充分镜提示词：拍1 AI 转 H3 规范提示词（勾选 AI 时），拍2+ 用景别模板
+    // 预填充分镜提示词：每一拍都用 AI 按第 4 步规范提示词转单帧（勾选 AI 时，按景别分配区分拍）
     const sb = (currentScript.storyboard_list || []) || [];
     const shots = Math.max(1, Math.min(5, parseInt($('storyShotsCount') ? $('storyShotsCount').value : '3') || 1));
     const total = sb.length * shots;
@@ -3669,10 +3680,10 @@ async function genAllAssets() {
     const shots = Math.max(1, Math.min(5, parseInt($('storyShotsCount') ? $('storyShotsCount').value : '3') || 1));
     for (let sn = 1; sn <= shots; sn++) {
       if (assetImgs.storyShots && assetImgs.storyShots[i] && assetImgs.storyShots[i][sn]) continue;
-      if (sn === 1 && $('storyAiPrompt') && $('storyAiPrompt').checked && h3PromptOf(i)) {
+      if ($('storyAiPrompt') && $('storyAiPrompt').checked && h3PromptOf(i)) {
         aiFill++;
         $('assetProgress').style.display = '';
-        $('assetProgressText').textContent = `🤖 正在按第 4 步规范提示词填充分镜提示词（第 ${aiFill} 段，每段约 20-40 秒）…`;
+        $('assetProgressText').textContent = `🤖 正在按第 4 步规范提示词填充分镜提示词（第 ${aiFill} 张，每张约 20-40 秒）…`;
       }
       // 按最新规则填充：拍1 用第 4 步 H3 规范提示词 AI 转单帧（勾选 AI 时），其余用景别模板
       let prompt = await fillStoryShotPrompt(i, sn);
@@ -3714,10 +3725,10 @@ async function genStoryboards() {
     for (let sn = 1; sn <= shots; sn++) {
       if (assetImgs.storyShots && assetImgs.storyShots[i] && assetImgs.storyShots[i][sn]) continue;
       // 按最新规则填充：拍1 有第 4 步规范提示词且勾选 AI 时，AI 转单帧；拍2+ 用景别模板
-      if (sn === 1 && $('storyAiPrompt') && $('storyAiPrompt').checked && h3PromptOf(i)) {
+      if ($('storyAiPrompt') && $('storyAiPrompt').checked && h3PromptOf(i)) {
         aiFill++;
         $('assetProgress').style.display = '';
-        $('assetProgressText').textContent = `🤖 正在按第 4 步规范提示词填充分镜提示词（第 ${aiFill} 段，每段约 20-40 秒）…`;
+        $('assetProgressText').textContent = `🤖 正在按第 4 步规范提示词填充分镜提示词（第 ${aiFill} 张，每张约 20-40 秒）…`;
       }
       const prompt = await fillStoryShotPrompt(i, sn);
       const ref = ((assetState.storyShots && assetState.storyShots[i] && assetState.storyShots[i][sn]) || {}).gen_ref || '';
@@ -3742,6 +3753,8 @@ function pollAssetsTask(tid) {
   $('assetProgress').style.display = '';
   const stopBtn = $('btnStopAssets');
   if (stopBtn) stopBtn.style.display = 'inline-block';
+  const stopTop = $('btnStopAssetsTop');
+  if (stopTop) stopTop.disabled = false;
   if (assetsPoll) clearInterval(assetsPoll);
   assetsPoll = setInterval(async () => {
     try {
@@ -3757,6 +3770,7 @@ function pollAssetsTask(tid) {
         assetsGenRunning = false;
         $('assetProgress').style.display = 'none';
         if (stopBtn) stopBtn.style.display = 'none';
+        if (stopTop) stopTop.disabled = true;
         if (d.status === 'done') {
           await loadProject();  // 同步服务端已生成的资产
           renderAssets();
@@ -3774,12 +3788,14 @@ function pollAssetsTask(tid) {
       assetsGenRunning = false;
       $('assetProgress').style.display = 'none';
       if (stopBtn) stopBtn.style.display = 'none';
+      if (stopTop) stopTop.disabled = true;
       toast('进度查询失败：' + e.message, true);
     }
   }, 3000);
 }
 
 function stopAssetsNow() {
+  if (!assetsGenRunning && !assetsPoll) { toast('当前没有生成任务', true); return; }
   cancelAssetsTask();
   toast('⏹ 已停止批量生图，可重新生成或清空');
   renderAssets();
@@ -3792,6 +3808,8 @@ async function cancelAssetsTask() {
   $('assetProgress').style.display = 'none';
   const stopBtn = $('btnStopAssets');
   if (stopBtn) stopBtn.style.display = 'none';
+  const stopTop = $('btnStopAssetsTop');
+  if (stopTop) stopTop.disabled = true;
   try { await fetch('/api/assets_gen_cancel', {method: 'POST'}); } catch (e) {}
 }
 

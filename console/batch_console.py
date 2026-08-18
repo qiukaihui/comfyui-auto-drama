@@ -4210,6 +4210,68 @@ def _sync_role_appearance_from_prompts(proj):
     return changed, app
 
 
+def _sync_scene_env_from_prompts(proj):
+    """从第 4 步 H3 规范提示词的【风格与场景上下文】提取每个场景的
+    地点 + 光线/色调氛围，写入 assetState.scenes[name].env（不覆盖用户手写的 desc）。
+    返回 (是否变更, {场景名: 环境描述})。"""
+    pt = proj.get("prompt_tasks") or []
+    sb = proj.get("current_script") or {}
+    sbl = sb.get("storyboard_list") or []
+    ast = dict(proj.get("asset_state") or {})
+    scenes = dict(ast.get("scenes") or {})
+    envs = {}
+    for i, t in enumerate(pt):
+        p = str(t.get("prompt") or "")
+        sc = None
+        if i < len(sbl):
+            sc = str(_pick(sbl[i], "scene", "location", "scene_name") or "").strip()
+        if not sc or sc in envs:
+            continue
+        m = re.search(r"【风格与场景上下文】\s*([^\n]+)", p)
+        if not m:
+            continue
+        line = m.group(1).strip()
+        loc = ""
+        lm = re.search(r"地点为\s*([^；。;]+)", line)
+        if lm:
+            loc = lm.group(1).strip()
+        light = ""
+        seg = line.split("表演基调")[0]
+        keep = [c.strip() for c in re.split(r"[，,；;]", seg)
+                if re.search(r"光|灯|色调|暖光|冷光|冷蓝|夜色|阳光|月光|阴影|昏黄|明亮|昏暗|雨|雪|雾", c)]
+        if keep:
+            light = "，".join(keep[:2])
+        env = "；".join(x for x in [loc, light] if x).strip("，；。 ")
+        if env and len(env) > 2:
+            envs[sc] = env
+    changed = False
+    for n, env in envs.items():
+        scenes.setdefault(n, {})
+        if str(scenes[n].get("env") or "").strip() != env:
+            scenes[n]["env"] = env
+            changed = True
+    if changed:
+        ast["scenes"] = scenes
+        proj["asset_state"] = ast
+    return changed, envs
+
+
+def _asset_tpl_shot_line(shot):
+    """从 asset_tpl 规则的「分镜-景别分配」取第 N 拍的景别/构图说明；取不到返回空串。"""
+    try:
+        tpl = str(ASSET_TPL_RULE or "")
+        m = re.search(r"分镜-景别分配[^\n]*\n([\s\S]*?)(?=\n##|\Z)", tpl)
+        if not m:
+            return ""
+        for line in m.group(1).splitlines():
+            mm = re.match(rf"^\s*{int(shot)}\s*=\s*(.+)$", line.strip())
+            if mm:
+                return mm.group(1).strip()
+    except Exception:
+        pass
+    return ""
+
+
 _VIEW_ZH = {"front": "正面", "face": "脸部特写", "side": "侧面", "back": "背面"}
 
 
@@ -4557,9 +4619,13 @@ def _save_expand_progress(rows, tid, final=False):
         proj["prompt_tasks"] = rows
         proj["prompt_updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
         if final:
-            # 扩写完成：把角色最新形象（STRICT 行）同步进资产状态，供第 5 步锚点提示词使用
+            # 扩写完成：把角色形象（STRICT 行）与场景环境同步进资产状态，供第 5 步使用
             try:
                 _sync_role_appearance_from_prompts(proj)
+            except Exception:
+                pass
+            try:
+                _sync_scene_env_from_prompts(proj)
             except Exception:
                 pass
         st["project"] = proj
@@ -5964,6 +6030,11 @@ class Handler(BaseHTTPRequestHandler):
             sb = body.get("storyboard") or {}
             roles = body.get("roles") or []
             h3_prompt = str(body.get("h3_prompt") or "").strip()
+            shot = 0
+            try:
+                shot = int(body.get("shot") or 0)
+            except (TypeError, ValueError):
+                shot = 0
             token = _lm_token(body)
             if not sb.get("scene") and not sb.get("action") and not h3_prompt:
                 self._send(400, json.dumps({"error": "分镜缺少场景或动作（也没有 H3 规范提示词）"}, ensure_ascii=False))
@@ -5980,6 +6051,13 @@ class Handler(BaseHTTPRequestHandler):
                 "根据下面这个分镜生成分镜图提示词：\n"
                 + json.dumps({"storyboard": sb, "roles": roles}, ensure_ascii=False, indent=1)
             )
+            if shot > 0:
+                shot_line = _asset_tpl_shot_line(shot)
+                if shot_line:
+                    user_parts.append(
+                        f"本拍为第 {shot} 拍，必须按这个景别/构图执行：{shot_line}。"
+                        "画面只取该景别下的一个动作瞬间，不得跳成其他景别。"
+                    )
             user = "\n\n".join(user_parts)
             try:
                 resp = lmstudio_chat([
@@ -6078,12 +6156,13 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(400, json.dumps({"error": f"批量修改失败：{e}"}, ensure_ascii=False))
             return
         if path == "/api/sync_role_appearance":
-            """把第 4 步规范提示词的 STRICT 行同步为角色最新形象（appearance）。"""
+            """把第 4 步规范提示词同步为角色形象（appearance）与场景环境（env）。"""
             try:
                 st = load_state()
                 proj = dict(st.get("project") or {})
-                changed, app = _sync_role_appearance_from_prompts(proj)
-                if changed:
+                changed_r, app = _sync_role_appearance_from_prompts(proj)
+                changed_s, envs = _sync_scene_env_from_prompts(proj)
+                if changed_r or changed_s:
                     st["project"] = proj
                     projects = st.get("projects") or {}
                     if proj.get("name"):
@@ -6092,7 +6171,9 @@ class Handler(BaseHTTPRequestHandler):
                         projects[proj["name"]] = snap
                         st["projects"] = projects
                     save_state(st)
-                self._send(200, json.dumps({"changed": changed, "roles": app}, ensure_ascii=False))
+                self._send(200, json.dumps({
+                    "changed": changed_r or changed_s, "roles": app, "scenes": envs,
+                }, ensure_ascii=False))
             except Exception as e:
                 self._send(400, json.dumps({"error": f"同步角色形象失败：{e}"}, ensure_ascii=False))
             return
