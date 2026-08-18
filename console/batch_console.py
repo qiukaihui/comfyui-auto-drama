@@ -6052,11 +6052,21 @@ class Handler(BaseHTTPRequestHandler):
                 + json.dumps({"storyboard": sb, "roles": roles}, ensure_ascii=False, indent=1)
             )
             if shot > 0:
+                shots_total = 0
+                try:
+                    shots_total = int(body.get("shots_total") or 0)
+                except (TypeError, ValueError):
+                    shots_total = 0
                 shot_line = _asset_tpl_shot_line(shot)
                 if shot_line:
                     user_parts.append(
-                        f"本拍为第 {shot} 拍，必须按这个景别/构图执行：{shot_line}。"
-                        "画面只取该景别下的一个动作瞬间，不得跳成其他景别。"
+                        f"本拍为第 {shot} 拍"
+                        + (f"（共 {shots_total} 拍）" if shots_total > 0 else "")
+                        + "。构图规则：优先按 H3 提示词里的镜头时间轴/景别/焦段/运镜规划"
+                        "取本拍画面——H3 标注远景/全景/拉远的段落禁止强行切近景特写，"
+                        "H3 标注近景/特写的段落禁止强行拉远景；画面只取该镜头规划内对应"
+                        "时间点的一个定格瞬间。H3 没有明确景别时才用通用分配"
+                        f"（{shot_line}）。"
                     )
             user = "\n\n".join(user_parts)
             try:

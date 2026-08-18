@@ -3193,6 +3193,10 @@ function h3PromptOf(i) {
   return ((promptTasks && promptTasks[i] && String(promptTasks[i].prompt || '').trim())) || '';
 }
 
+function storyShotsTotal() {
+  return Math.max(1, Math.min(5, parseInt($('storyShotsCount') ? $('storyShotsCount').value : '3') || 1));
+}
+
 async function fillStoryShotPrompt(i, sn) {
   // 按最新规则填充分镜图提示词：
   // 每一拍：勾选 AI 且有第 4 步 H3 规范提示词时，用 AI 转单帧分镜图提示词
@@ -3214,7 +3218,7 @@ async function fillStoryShotPrompt(i, sn) {
     try {
       const r = await fetch('/api/story_prompt', {
         method: 'POST', headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({storyboard: sb, roles, h3_prompt: h3, shot: sn, lmstudio_token: $('lmToken').value.trim()}),
+        body: JSON.stringify({storyboard: sb, roles, h3_prompt: h3, shot: sn, shots_total: storyShotsTotal(), lmstudio_token: $('lmToken').value.trim()}),
       });
       const d = await r.json();
       if (r.ok && d.prompt && String(d.prompt).trim()) return String(d.prompt).trim();
@@ -3448,7 +3452,7 @@ async function genStoryImg(i, shotIdx) {
       try {
         const r = await fetch('/api/story_prompt', {
           method: 'POST', headers: {'Content-Type':'application/json'},
-          body: JSON.stringify({storyboard: sb, roles, h3_prompt: h3PromptOf(i), shot: shotIdx, lmstudio_token: $('lmToken').value.trim()}),
+          body: JSON.stringify({storyboard: sb, roles, h3_prompt: h3PromptOf(i), shot: shotIdx, shots_total: storyShotsTotal(), lmstudio_token: $('lmToken').value.trim()}),
         });
         const d = await r.json();
         if (r.ok && d.prompt) {
