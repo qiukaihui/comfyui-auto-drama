@@ -67,7 +67,7 @@ _CONFIG_DEFAULTS = {
             "steps": 20,
             "target_mode": "micro_video_5_frames",
             "reference_strength": 0.75,
-            "t2i_reference_strength": 0.2,
+            "t2i_unet": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
             "story_mode": "refedit",
             "timeout": 900,
         },
@@ -97,6 +97,20 @@ def _config_path():
     if env:
         return env
     return os.path.join(PROJECT_ROOT, "config.json")
+
+
+def _set_image_gen_provider(provider):
+    """切换 image_gen.provider 并立即重载配置（local=Boogu / comfyui=远程 H3）。"""
+    global _CONFIG
+    p = _config_path()
+    if os.path.isfile(p):
+        shutil.copy(p, p + ".bak")
+    cfg = load_config()
+    cfg.setdefault("image_gen", {})["provider"] = provider
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    _CONFIG = load_config()
+    return _CONFIG
 
 
 def _abs_path(p):
@@ -152,6 +166,90 @@ ASSEMBLE_JOBS = {}
 ASSEMBLE_JOBS_LOCK = threading.Lock()
 ASSET_JOBS = {}
 ASSET_JOBS_LOCK = threading.Lock()
+_STORY_GEN_IN_FLIGHT = set()  # 分镜单张生成去重：{段:拍}，已在队列时拒绝重复点击
+_PENDING_ASSETS = {}          # 分镜单张生成待落盘记录：{filename: {...}}，重启后据此从远程补回
+
+
+def _persist_pending_assets():
+    """把待恢复的分镜生成记录写入 state（SQLite），重启后据此补回结果。"""
+    try:
+        st = load_state()
+        st["pending_asset_jobs"] = [dict(r) for r in _PENDING_ASSETS.values()]
+        save_state(st)
+    except Exception:
+        pass
+
+
+def _note_pending_pid(filename, pid):
+    """生成任务提交后回填 prompt_id 并落盘（此时远程任务与本地请求能对应）。"""
+    rec = _PENDING_ASSETS.get(filename)
+    if rec and not rec.get("pid"):
+        rec["pid"] = pid
+        _persist_pending_assets()
+
+
+def _recover_pending_assets():
+    """控制台重启后恢复：查远程 history，已完成的下载+登记，丢失的清除。"""
+    try:
+        st = load_state()
+        pend = st.get("pending_asset_jobs") or []
+    except Exception:
+        return
+    if not pend:
+        return
+    for rec in pend:
+        if isinstance(rec, dict) and rec.get("filename"):
+            _PENDING_ASSETS[rec["filename"]] = rec
+    server = str((_CONFIG.get("image_gen", {}).get("comfyui") or {}).get("server") or DEFAULT_SERVER).rstrip("/")
+    handled = set()
+    for filename, rec in list(_PENDING_ASSETS.items()):
+        pid = rec.get("pid")
+        if not pid or str(rec.get("kind") or "") != "story":
+            continue
+        try:
+            hist = api_get(server, f"/history/{pid}", timeout=15)
+        except Exception:
+            continue  # 远程暂不可达，保留记录下次再试
+        entry = (hist or {}).get(pid)
+        if not entry:
+            try:
+                q = api_get(server, "/queue", timeout=10)
+                active = {x[1] for x in q.get("queue_running", [])} | {x[1] for x in q.get("queue_pending", [])}
+            except Exception:
+                active = set()
+            if pid not in active:
+                handled.add(filename)
+                print(f"[recover] 任务已丢失（远程重启），清除记录：{pid[:12]}", flush=True)
+            continue
+        status = entry.get("status") or {}
+        if status.get("status_str") == "error":
+            handled.add(filename)
+            print(f"[recover] 任务失败：{pid[:12]}", flush=True)
+            continue
+        imgs = [im for _nid, out in (entry.get("outputs") or {}).items() for im in out.get("images", [])]
+        if not imgs:
+            continue
+        im = imgs[0]
+        q = urllib.parse.urlencode({
+            "filename": im.get("filename", ""), "subfolder": im.get("subfolder", ""),
+            "type": im.get("type", "output"),
+        })
+        try:
+            req = urllib.request.Request(server + "/view?" + q, headers={"User-Agent": "batch-console"})
+            with _opener().open(req, timeout=600) as r:
+                raw = r.read()
+            dest_fn = filename if filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp")) else filename + ".png"
+            with open(os.path.join(IMAGE_DIRS[0], dest_fn), "wb") as f:
+                f.write(raw)
+            _register_asset(rec["kind"], rec.get("key"), dest_fn, None,
+                            {"verified": True, "issues": [], "attempts": 1}, rec.get("shot"))
+            handled.add(filename)
+            print(f"[recover] 已补登记 {dest_fn}（pid {pid[:12]}）", flush=True)
+        except Exception as e:
+            print(f"[recover] 补登记失败 {pid[:12]}：{e}", flush=True)
+    for fn in handled:
+        _PENDING_ASSETS.pop(fn, None)
+    _persist_pending_assets()
 
 
 def estimate_timeout(task):
@@ -323,6 +421,38 @@ def save_state(state):
         conn.close()
 
 
+def _save_script_to_project(script, field="before"):
+    """把剧本写入当前项目并立即落库（导入/解析/生成/改写每步都调用，防数据只留内存）。
+    field: before=写 script_before + current_script；after=写 script_after。"""
+    try:
+        st = load_state()
+        proj = dict(st.get("project") or {})
+        if not proj.get("name"):
+            return False
+        if field == "after":
+            proj["script_after"] = script
+        else:
+            proj["script_before"] = script
+            proj["current_script"] = script
+        proj.setdefault("prompt_tasks", [])
+        proj.setdefault("asset_imgs", {})
+        proj.setdefault("asset_prompts", {})
+        proj.setdefault("asset_meta", {})
+        proj.setdefault("asset_state", {})
+        proj.setdefault("generation_log", [])
+        st["project"] = proj
+        projects = st.get("projects") or {}
+        snap = dict(proj)
+        snap["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        projects[proj["name"]] = snap
+        st["projects"] = projects
+        save_state(st)
+        return True
+    except Exception as e:
+        print(f"[script-save] 落库失败：{e}", flush=True)
+        return False
+
+
 def find_image(filename):
     for d in IMAGE_DIRS:
         p = os.path.join(d, filename)
@@ -436,12 +566,22 @@ def delete_project_all(name):
     return {"deleted": name, "files_moved": len(moved), "trash_dir": trash}
 
 
+def _ref_video_dir():
+    """参考视频上传目录（素材/参考视频）：只有这里面的视频会出现在参考视频列表。"""
+    d = os.path.join(IMAGE_DIRS[0], "参考视频")
+    if not os.path.isdir(d):
+        try:
+            os.makedirs(d, exist_ok=True)
+        except OSError:
+            pass
+    return d
+
+
 def list_media():
-    """列出素材目录里的视频/音频文件（参考视频用）。排除合成成片（合成_*），避免误当参考。"""
+    """列出用户上传的参考视频/音频（素材/参考视频）。排除合成成片（合成_*），避免目录噪音。"""
     found = []
-    for d in IMAGE_DIRS:
-        if not os.path.isdir(d):
-            continue
+    d = _ref_video_dir()
+    if os.path.isdir(d):
         for fn in sorted(os.listdir(d)):
             if fn.startswith("合成_"):
                 continue
@@ -768,14 +908,14 @@ SCENE_ANCHORS = [
         "image": "场景锚点_麦田夜景.png",
         "desc": (
             "月光下的麦田，银绿色麦浪起伏，田埂土路，远处低矮村舍轮廓，薄雾低垂，"
-            "1980年代胶片质感，电影级夜景光线，深蓝绿色夜空，柔和月光"
+            "胶片质感，电影级夜景光线，深蓝绿色夜空，柔和月光"
         ),
     },
     {
         "keywords": ["卧室", "床", "台灯", "房间", "bedroom", "bed"],
         "image": "场景锚点_80年代卧室.png",
         "desc": (
-            "1980年代中国乡村卧室，雕花木床架，蓝底白花粗布床单，藤编衣柜，黄铜台灯泛光，"
+            "乡村卧室，雕花木床架，蓝底白花粗布床单，藤编衣柜，黄铜台灯泛光，"
             "青砖墙面，老式铜插销木门，温暖钨丝灯光，怀旧温馨氛围，胶片质感"
         ),
     },
@@ -783,7 +923,7 @@ SCENE_ANCHORS = [
         "keywords": ["教学楼", "学校", "校园", "老槐树", "教室", "school", "campus", "classroom"],
         "image": None,
         "desc": (
-            "1980年代中国中学校园，教学楼门口，院子里老槐树，温暖怀旧色调，胶片质感"
+            "中学校园，教学楼门口，院子里老槐树，温暖怀旧色调，胶片质感"
         ),
     },
     {
@@ -2127,15 +2267,12 @@ def compose_storyboard_prompt(sb, role_map, detailed=False):
 
     detailed=True 时深度扩写：运镜词典、场景光线氛围、动作细节、负面约束、
     声音设计全部展开，适合「剧本简略 → 可执行分镜」。
+
+    场景完全按剧本原文输出，不做任何年代/风格模板注入（写死的 1980s 场景库
+    已从提示词路径移除；年代/风格由剧本设定提供，见 CHANGELOG v0.13.45）。
     """
     scene_name = str(_pick(sb, "scene", "location", "place", "scene_name") or "").strip()
-    anchor = match_scene(scene_name) if scene_name else None
-    scene_desc = anchor["desc"] if anchor else f"a 1980s Chinese setting, {scene_name or 'rural China'}"
-    scene_key = None
-    for k in SCENE_DETAILS:
-        if k in scene_name:
-            scene_key = k
-            break
+    scene_desc = scene_name
 
     role_parts = []
     for rn in _sb_roles(sb):
@@ -2148,24 +2285,15 @@ def compose_storyboard_prompt(sb, role_map, detailed=False):
     dialogue = str(_pick(sb, "dialogue", "line", "speech", "台词") or "").strip()
     camera = str(_pick(sb, "camera", "camera_move", "shot_type") or "").strip() or "缓慢推近"
 
-    parts = [f"环境为{scene_desc}"]
-    if detailed and scene_key:
-        parts.append(SCENE_DETAILS[scene_key])
+    parts = [f"环境为{scene_desc}"] if scene_desc else []
     if role_parts:
         parts.append("画面人物：" + "、".join(role_parts))
     if detailed and role_parts:
         parts.append("人物保持与参考图完全一致的身份、发型、服装与肤色，神态自然、情绪真实")
     if action:
-        # 动作细节：命中词典用英文动作句，否则保留用户原文
-        action_detail = ""
-        for kw, a_desc in ACTION_ANCHORS.items():
-            if kw in action:
-                action_detail = a_desc
-                break
-        if detailed and action_detail:
-            parts.append(f"动作：{action_detail}")
-        else:
-            parts.append(f"动作：{action}")
+        # 动作原文保真：始终保留剧本原文；仅当剧本只写了一个裸动作词（整串等于词典键）时补标准描述
+        act_detail = ACTION_ANCHORS.get(action.strip()) if detailed else None
+        parts.append(f"动作：{action}" + (f"；{act_detail}" if act_detail else ""))
     if dialogue:
         dlines = split_dialogue_lines(dialogue)
         if dlines:
@@ -2177,12 +2305,9 @@ def compose_storyboard_prompt(sb, role_map, detailed=False):
         else:
             parts.append(f"人物用中文清晰说出对白：<d>[Chinese] {dialogue}</d>")
     if detailed:
-        camera_verb = None
-        for kw, cv in CAMERA_MOVES.items():
-            if kw in camera:
-                camera_verb = cv
-                break
-        parts.append((camera_verb or "The camera frames a medium shot") + "。")
+        # 机位原文保真：只对整串等于词典键的裸词做标准展开，其余一律保留剧本原文
+        camera_verb = CAMERA_MOVES.get(camera.strip())
+        parts.append((camera_verb or camera or "The camera frames a medium shot") + "。")
     else:
         parts.append(f"镜头{camera}")
     if detailed and role_parts:
@@ -2197,10 +2322,7 @@ def compose_storyboard_prompt(sb, role_map, detailed=False):
 
     snd = str(_pick(sb, "sound", "soundscape", "sound_effects", "audio") or "").strip()
     if not snd:
-        if detailed and scene_key:
-            snd = SCENE_SOUNDS[scene_key]
-        else:
-            snd = "自然的环境声，清晰的人声对白，无背景音乐。"
+        snd = "自然的环境声，清晰的人声对白，无背景音乐。"
     mus = str(_pick(sb, "music", "non_diegetic_music") or "").strip() or "N/A"
     return (
         f"integrated_multimodal_description: [Shot 1] {desc}\n\n"
@@ -2392,7 +2514,7 @@ STORY_PROMPT_SYSTEM = """你是爆款短剧分镜画师兼文生图提示词专�
 3. 情节动作：本段核心动作，具体可拍：谁、做什么、怎么动
 4. 情绪氛围：把情绪转成视觉（光线冷暖、色调、气氛词、构图松紧），禁止抽象情绪词
 5. 构图：按运镜给出画面构图（特写/中近景/双人同框/远景），竖构图 3:4
-6. 风格：1980s 中国乡村，电影感故事板，写实，胶片质感
+6. 风格：按剧本设定的年代/基调（剧本未写明年代则不写年代），电影感故事板，写实，胶片质感
 7. 负面约束（必须保留）：画面中严格只有 N 个剧本角色，无第三人、无多余的肢体/手臂/手从画面外伸入，每人四肢完整各两只手、手指清晰不粘连，服装道具正常无穿帮，无文字乱码，无现代物品，无塑料包装盒，无饮料瓶
 
 【角色形象一致性】每个角色的性别、发型、服装必须与提供的"角色锚点提示词"完全一致，全片所有分镜图同一角色形象不变。
@@ -2457,6 +2579,14 @@ FAILURE_CODES_SYSTEM = """# 失败码诊断速查表
 # ---------- 规则文件加载（编辑 rules/*.md 即可改规则，无需动代码） ----------
 
 def _load_rule(name, fallback):
+    # 规则存储优先级：数据库（rule:{name}）→ rules/{name}.md → 内置默认
+    try:
+        st = load_state()
+        dbv = st.get("rule:" + name)
+        if isinstance(dbv, str) and dbv.strip():
+            return dbv.strip()
+    except Exception:
+        pass
     p = os.path.join(RULES_DIR, name + ".md")
     if os.path.isfile(p):
         try:
@@ -2469,14 +2599,107 @@ def _load_rule(name, fallback):
     return fallback
 
 
-_BUILTIN_H3_EXPAND_SYSTEM = H3_EXPAND_SYSTEM
-_BUILTIN_H3_POLISH_SYSTEM = H3_POLISH_SYSTEM
-_BUILTIN_SCRIPT_GEN_SYSTEM = SCRIPT_GEN_SYSTEM
-_BUILTIN_SCRIPT_REWRITE_SYSTEM = SCRIPT_REWRITE_SYSTEM
-_BUILTIN_SCRIPT_TEXT_SYSTEM = SCRIPT_TEXT_SYSTEM
-_BUILTIN_ASSET_PROMPT_SYSTEM = ASSET_PROMPT_SYSTEM
-_BUILTIN_STORY_PROMPT_SYSTEM = STORY_PROMPT_SYSTEM
-_BUILTIN_FAILURE_CODES_SYSTEM = FAILURE_CODES_SYSTEM
+def _read_builtin_rule(name):
+    """内置兜底：优先读 rules/<name>.md（仓库自带文件），读不到返回空串。"""
+    try:
+        p = os.path.join(RULES_DIR, name + ".md")
+        with open(p, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
+
+_BUILTIN_H3_EXPAND_SYSTEM = _read_builtin_rule("h3_expand") or H3_EXPAND_SYSTEM
+_BUILTIN_H3_POLISH_SYSTEM = _read_builtin_rule("h3_polish") or H3_POLISH_SYSTEM
+_BUILTIN_SCRIPT_GEN_SYSTEM = _read_builtin_rule("script_gen") or SCRIPT_GEN_SYSTEM
+_BUILTIN_SCRIPT_REWRITE_SYSTEM = _read_builtin_rule("script_rewrite") or SCRIPT_REWRITE_SYSTEM
+_BUILTIN_SCRIPT_TEXT_SYSTEM = _read_builtin_rule("script_text") or SCRIPT_TEXT_SYSTEM
+_BUILTIN_ASSET_PROMPT_SYSTEM = _read_builtin_rule("asset_prompt") or ASSET_PROMPT_SYSTEM
+_BUILTIN_STORY_PROMPT_SYSTEM = _read_builtin_rule("story_prompt") or STORY_PROMPT_SYSTEM
+_BUILTIN_FAILURE_CODES_SYSTEM = _read_builtin_rule("failure_codes") or FAILURE_CODES_SYSTEM
+_BUILTIN_REF_SHOTS = _read_builtin_rule("ref_shots")
+_BUILTIN_ASSET_TPL = _read_builtin_rule("asset_tpl")
+_BUILTIN_ASSET_QC = _read_builtin_rule("asset_qc") or """# 资产质检规则（质检模型按模板检查生成图，占位符会被替换）
+
+## 角色
+你是图片质检员。检查这张角色锚点图，严格只输出 JSON：{"ok": true或false, "issues": ["问题1", ...]}
+检查项：
+0. 人物必须符合本次提示词描述（身材/体态/发型/服装等以文字为准）：{PROMPT}
+1. 人物性别必须是「{GENDER}」
+2. 发型服装必须与设定一致：{LOOK}
+3. 画面干净：无多余肢体/多余手指、无重复人物、无文字乱码、无现代物品
+4. 画面完整：整张图完整渲染，无大面积空白/灰色色块/未生成区域/半成品拼接
+若发型或服装与设定不符，必须列为问题。
+ok=true 表示全部通过；否则 ok=false 并列出具体问题。
+
+## 角色-侧面
+你是图片质检员。检查这张角色侧面参考图（90度正侧面），严格只输出 JSON：{"ok": true或false, "issues": ["问题1", ...]}
+检查项：
+0. 人物必须符合本次提示词描述：{PROMPT}
+1. 侧面轮廓、发型、服装必须与设定一致：{LOOK}
+2. 侧面视角正常（人物侧身站立，面部朝向画面侧面，不要求正脸）
+3. 画面干净：无多余肢体/多余手指、无重复人物、无文字乱码、无现代物品
+ok=true 表示全部通过；否则 ok=false 并列出具体问题。
+
+## 角色-背面
+你是图片质检员。检查这张角色背面参考图，严格只输出 JSON：{"ok": true或false, "issues": ["问题1", ...]}
+检查项：
+0. 人物必须符合本次提示词描述：{PROMPT}
+1. 背面视角正常（人物背对镜头，看不到正脸属正常）
+2. 发型与服装必须与设定一致：{LOOK}
+3. 画面干净：无多余肢体/多余手指、无重复人物、无文字乱码、无现代物品
+ok=true 表示全部通过；否则 ok=false 并列出具体问题。
+
+## 角色-脸部
+你是图片质检员。检查这张角色脸部特写参考图，严格只输出 JSON：{"ok": true或false, "issues": ["问题1", ...]}
+检查项：
+0. 人物必须符合本次提示词描述：{PROMPT}
+1. 五官清晰、面部占画面主体
+2. 发型与设定一致：{LOOK}
+3. 人物性别必须是「{GENDER}」
+4. 画面干净：无多余肢体/手指、无重复人物、无文字乱码
+ok=true 表示全部通过；否则 ok=false 并列出具体问题。
+
+## 场景
+你是图片质检员。检查这张场景参考图，严格只输出 JSON：{"ok": true或false, "issues": ["问题1", ...]}
+检查项：
+0. 图片必须符合本次提示词要求：{PROMPT}（提示词明确要求画面内无人物时，画面中绝对不能出现任何人）
+1. 画面内无人物
+2. 无文字乱码
+3. 无现代物品（路灯/汽车/塑料/现代包装等）
+4. 画面完整：整张图完整渲染，无大面积空白/灰色色块/未生成区域/半成品拼接
+注意：描述里如果出现剧情人物/动作，只用于判断场景环境，场景参考图必须无人。
+若场景与描述明显不符，必须列为问题。
+ok=true 表示全部通过；否则 ok=false 并列出具体问题。
+
+## 分镜
+你是图片质检员。检查这张分镜图，严格只输出 JSON：{"ok": true或false, "issues": ["问题1", ...]}
+检查项：
+0. 必须符合本次提示词画面要求：{PROMPT}
+{PEOPLE_LINE}
+1. 肢体完整：无多余手指/手臂/腿部异常纹理
+2. 人体结构：每个头部与身体必须自然衔接（无错位/拼接感/断头/头身朝向矛盾），颈部正常不扭曲，姿势符合动作描述
+3. 画面干净：无文字乱码、无重复人物、无现代物品、道具正常（无塑料包装盒/饮料瓶）
+4. 画面完整：整张图完整渲染，无大面积空白/灰色色块/未生成区域/半成品拼接
+ok=true 表示全部通过；否则 ok=false 并列出具体问题。
+"""
+_BUILTIN_REF_LINK = _read_builtin_rule("ref_link") or """# 参考图解析规则（生成提示词时按模板输出【参考图解析】块）
+
+模板行（前端生成块时按 key 取用，{标签}/{角色名}/{视角} 会被替换；不要改动 key 前缀）：
+参考图解析-角色：<Picture {标签}> = 角色参考图（面容/发型/服装锁定）：只继承人物身份、发型、服装与肤色；身材与体态特征（丰满/瘦削/高挑等）以本提示词文字为准，参考图不锁定身材；排除原图姿势、构图、背景、光线与调色。
+参考图解析-场景：<Picture {标签}> = 场景参考图（空间/陈设基准）：只继承空间布局、陈设与氛围；排除原图构图、机位与光线。
+参考图解析-底图：<Picture {标签}> = 底图参考：只继承空间布局与人物身份信息；排除原图构图、机位、光线与背景细节。
+参考图解析-锚点：<Picture {标签}> = 角色「{角色名}」{视角}锚点（面容/发型/服装锁定）：只继承身份、发型、服装与肤色；身材与体态以本提示词文字为准；排除原图姿势、构图、背景、光线与调色。
+参考图解析-标题：本图使用 refedit 模式，自动关联：
+
+规则说明（供人阅读 / AI 扩写）：
+- 模式：refedit（Still 出图）<Picture N> 按连接顺序 1 基编号；edit_image/自定义上传 = <Picture 1>，
+  ref_images.ref_image_N = <Picture N+1>；Ref2VA 出视频 ref_image_0..8 对应 <Picture 1>..<Picture 9>；
+  I2V/FL2VA 首帧是画面起点锚点，禁止写成 <Picture 1>
+- 角色参考图只继承身份/发型/服装/肤色，身材与体态以提示词文字为准，排除姿势/构图/背景/光线/调色
+- 场景参考图只继承空间布局/陈设/氛围，排除构图/机位/光线
+- 底图只继承空间布局与人物身份信息，排除构图/机位/光线/背景细节
+"""
 
 H3_EXPAND_SYSTEM = _load_rule("h3_expand", _BUILTIN_H3_EXPAND_SYSTEM)
 H3_POLISH_SYSTEM = _load_rule("h3_polish", _BUILTIN_H3_POLISH_SYSTEM)
@@ -2486,6 +2709,47 @@ SCRIPT_TEXT_SYSTEM = _load_rule("script_text", _BUILTIN_SCRIPT_TEXT_SYSTEM)
 ASSET_PROMPT_SYSTEM = _load_rule("asset_prompt", _BUILTIN_ASSET_PROMPT_SYSTEM)
 STORY_PROMPT_SYSTEM = _load_rule("story_prompt", _BUILTIN_STORY_PROMPT_SYSTEM)
 FAILURE_CODES_SYSTEM = _load_rule("failure_codes", _BUILTIN_FAILURE_CODES_SYSTEM)
+REF_LINK_RULE = _load_rule("ref_link", _BUILTIN_REF_LINK)
+ASSET_QC_RULE = _load_rule("asset_qc", _BUILTIN_ASSET_QC)
+REF_SHOTS_RULE = _load_rule("ref_shots", _BUILTIN_REF_SHOTS)
+ASSET_TPL_RULE = _load_rule("asset_tpl", _BUILTIN_ASSET_TPL)
+
+# ---------- Hell Grind 吸收：契约 / 连续性 / 表演 / 摄影 / 物理 / 空间 / 光色 / 图片 / 质量（全部入库可编辑） ----------
+_BUILTIN_FILM_CONTRACT = _read_builtin_rule("film_contract") or ""
+_BUILTIN_CONTINUITY = _read_builtin_rule("continuity") or ""
+_BUILTIN_DIALOGUE_AUDIO = _read_builtin_rule("dialogue_audio") or ""
+_BUILTIN_NEGATIVE_RULES = _read_builtin_rule("negative_rules") or ""
+_BUILTIN_CAMERA_LANG = _read_builtin_rule("camera_lang") or ""
+_BUILTIN_PERFORMANCE = _read_builtin_rule("performance") or ""
+_BUILTIN_ACTION_PHYSICS = _read_builtin_rule("action_physics") or ""
+_BUILTIN_SPATIAL_BLOCKING = _read_builtin_rule("spatial_blocking") or ""
+_BUILTIN_LIGHTING_MATERIAL = _read_builtin_rule("lighting_material") or ""
+_BUILTIN_IMAGE_PROMPT_CRAFTING = _read_builtin_rule("image_prompt_crafting") or ""
+_BUILTIN_PROMPT_PRESERVATION = _read_builtin_rule("prompt_preservation") or ""
+_BUILTIN_QUALITY_RUBRIC = _read_builtin_rule("quality_rubric") or ""
+_BUILTIN_QA_GATES = _read_builtin_rule("qa_gates") or ""
+_BUILTIN_SCRIPT_CONTINUITY = _read_builtin_rule("script_continuity") or ""
+_BUILTIN_RULE_ROUTER = _read_builtin_rule("rule_router") or ""
+_BUILTIN_REF_SHOTS_EXAMPLE = _read_builtin_rule("ref_shots_example") or ""
+_BUILTIN_BATCH_PROMPT_EDIT = _read_builtin_rule("batch_prompt_edit") or ""
+
+FILM_CONTRACT_RULE = _load_rule("film_contract", _BUILTIN_FILM_CONTRACT)
+CONTINUITY_RULE = _load_rule("continuity", _BUILTIN_CONTINUITY)
+DIALOGUE_AUDIO_RULE = _load_rule("dialogue_audio", _BUILTIN_DIALOGUE_AUDIO)
+NEGATIVE_RULES_RULE = _load_rule("negative_rules", _BUILTIN_NEGATIVE_RULES)
+CAMERA_LANG_RULE = _load_rule("camera_lang", _BUILTIN_CAMERA_LANG)
+PERFORMANCE_RULE = _load_rule("performance", _BUILTIN_PERFORMANCE)
+ACTION_PHYSICS_RULE = _load_rule("action_physics", _BUILTIN_ACTION_PHYSICS)
+SPATIAL_BLOCKING_RULE = _load_rule("spatial_blocking", _BUILTIN_SPATIAL_BLOCKING)
+LIGHTING_MATERIAL_RULE = _load_rule("lighting_material", _BUILTIN_LIGHTING_MATERIAL)
+IMAGE_PROMPT_CRAFTING_RULE = _load_rule("image_prompt_crafting", _BUILTIN_IMAGE_PROMPT_CRAFTING)
+PROMPT_PRESERVATION_RULE = _load_rule("prompt_preservation", _BUILTIN_PROMPT_PRESERVATION)
+QUALITY_RUBRIC_RULE = _load_rule("quality_rubric", _BUILTIN_QUALITY_RUBRIC)
+QA_GATES_RULE = _load_rule("qa_gates", _BUILTIN_QA_GATES)
+SCRIPT_CONTINUITY_RULE = _load_rule("script_continuity", _BUILTIN_SCRIPT_CONTINUITY)
+RULE_ROUTER_RULE = _load_rule("rule_router", _BUILTIN_RULE_ROUTER)
+REF_SHOTS_EXAMPLE_RULE = _load_rule("ref_shots_example", _BUILTIN_REF_SHOTS_EXAMPLE)
+BATCH_PROMPT_EDIT_RULE = _load_rule("batch_prompt_edit", _BUILTIN_BATCH_PROMPT_EDIT)
 
 
 RULES = {
@@ -2497,23 +2761,155 @@ RULES = {
     "asset_prompt": ("ASSET_PROMPT_SYSTEM", "生图提示词修改（对话改图）"),
     "story_prompt": ("STORY_PROMPT_SYSTEM", "分镜图提示词规范（按剧情生成）"),
     "failure_codes": ("FAILURE_CODES_SYSTEM", "失败码诊断速查表（生成失败定位）"),
+    "ref_link": ("REF_LINK_RULE", "参考图解析规则（提示词引用模板）"),
+    "asset_qc": ("ASSET_QC_RULE", "资产质检规则（角色/场景/分镜检查模板）"),
+    "ref_shots": ("REF_SHOTS_RULE", "参考图清单 + 分镜时间轴写法（Jaxx 风格）"),
+    "asset_tpl": ("ASSET_TPL_RULE", "资产提示词默认模板（角色/场景/分镜）"),
+    "film_contract": ("FILM_CONTRACT_RULE", "视频镜头契约（12 段导演版）"),
+    "continuity": ("CONTINUITY_RULE", "连续性控制（状态账本 + 三栏约束）"),
+    "dialogue_audio": ("DIALOGUE_AUDIO_RULE", "对白与声音（逐字锁/拟音/混音）"),
+    "negative_rules": ("NEGATIVE_RULES_RULE", "负向约束（少而准的风险控制）"),
+    "camera_lang": ("CAMERA_LANG_RULE", "摄影机与剪辑语言（start/path/end）"),
+    "performance": ("PERFORMANCE_RULE", "表演指导（情绪转译为可见行为）"),
+    "action_physics": ("ACTION_PHYSICS_RULE", "动作物理（五段物理链/重量/碰撞）"),
+    "spatial_blocking": ("SPATIAL_BLOCKING_RULE", "空间站位（四坐标/人数/唯一物体）"),
+    "lighting_material": ("LIGHTING_MATERIAL_RULE", "光色材质天气（真实光源/材质响应）"),
+    "image_prompt_crafting": ("IMAGE_PROMPT_CRAFTING_RULE", "图片提示词 11 类信息结构"),
+    "prompt_preservation": ("PROMPT_PRESERVATION_RULE", "意图保护与润色（约束快照）"),
+    "quality_rubric": ("QUALITY_RUBRIC_RULE", "提示词质量评分（100 分量表）"),
+    "qa_gates": ("QA_GATES_RULE", "项目质量门（阶段检查清单）"),
+    "script_continuity": ("SCRIPT_CONTINUITY_RULE", "剧本级连续性契约（段间衔接防穿帮）"),
+    "rule_router": ("RULE_ROUTER_RULE", "规则路由表（关键词触发注入）"),
+    "ref_shots_example": ("REF_SHOTS_EXAMPLE_RULE", "分镜时间轴完整示范（Jaxx 风格，按需注入）"),
+    "batch_prompt_edit": ("BATCH_PROMPT_EDIT_RULE", "批量提示词统一修改（一键改所有段落）"),
 }
 
 
+def _seed_rules_to_db():
+    """首次启动把规则写入数据库（rule:{name}），之后以数据库为准：可调用、可修改、重启不丢。"""
+    try:
+        st = load_state()
+        changed = False
+        for name, (const_name, _) in RULES.items():
+            key = "rule:" + name
+            if st.get(key) is None:
+                st[key] = globals()[const_name]
+                changed = True
+        if changed:
+            save_state(st)
+    except Exception as e:
+        print(f"[rules] 规则入库失败：{e}", flush=True)
+
+
+_seed_rules_to_db()
+
+
+def _rule_block(name, title=None):
+    """按名取规则（数据库→文件→内置），拼成可注入 system prompt 的块；规则为空时返回空串。"""
+    entry = RULES.get(name)
+    if not entry:
+        return ""
+    const_name, default_title = entry
+    content = str(globals().get(const_name) or "").strip()
+    if not content:
+        return ""
+    t = title or default_title
+    return f"\n\n【{t}（规则 {name}，必须遵循）】\n{content}"
+
+
+def _parse_rule_router():
+    """解析 rule_router 规则：返回 {"always": [规则名], "route": {规则名: [关键词]}}。"""
+    always, route = [], {}
+    for line in str(RULE_ROUTER_RULE or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or ":" not in line:
+            continue
+        key, val = line.split(":", 1)
+        names = [x.strip() for x in val.split(",") if x.strip()]
+        k = key.strip()
+        if k == "always":
+            always = [n for n in names if n in RULES]
+        elif k in RULES:
+            route[k] = names
+    return {"always": always, "route": route}
+
+
+def _route_expand_rules(item=None):
+    """按分镜内容关键词返回应额外注入的深度规则名（不含基础集）；item 为空返回 []。"""
+    if not item:
+        return []
+    router = _parse_rule_router()
+    route = router.get("route") or {}
+    text = " ".join(str(item.get(k) or "") for k in
+                    ("scene", "action", "dialogue", "emotion", "camera", "roles"))
+    return [rule for rule, kws in route.items() if any(kw in text for kw in kws)]
+
+
+def _expand_system_prompt(item=None, extra=None):
+    """H3 扩写 system prompt：
+
+    - 基础集 = h3_expand + config.json llm.expand_rules（默认 film_contract / ref_shots /
+      continuity / negative_rules，保证结构与风格稳定）
+    - 深度规则 = 按分镜关键词路由命中（rule_router 表，数据库可编辑）+ extra 手工追加，
+      不重复注入基础集已有规则；避免每次全量塞上下文
+    - 想始终注入某规则：把它加进 config.json 的 llm.expand_rules 即可
+    """
+    llm_cfg = _CONFIG.get("llm", {}) or {}
+    names = llm_cfg.get("expand_rules") or [
+        "film_contract", "ref_shots", "continuity", "negative_rules",
+    ]
+    routed = list(extra or [])
+    for r in _route_expand_rules(item):
+        if r not in routed:
+            routed.append(r)
+    parts = [str(H3_EXPAND_SYSTEM or "")]
+    for n in names:
+        if n == "h3_expand":
+            continue
+        block = _rule_block(n)
+        if block:
+            parts.append(block)
+    for n in routed:
+        if n in names:
+            continue
+        block = _rule_block(n)
+        if block:
+            parts.append(block)
+    return "\n\n".join(p for p in parts if p and p.strip())
+
+
 def save_rule(name, content, reset=False):
-    """保存/恢复规则：写文件 + 热更新内存常量（立即生效，无需重启）。"""
+    """保存/恢复规则：写数据库（主）+ 规则文件（可读备份）+ 热更新内存常量。"""
     if name not in RULES:
         raise ValueError(f"未知规则：{name}")
     const_name = RULES[name][0]
+    key = "rule:" + name
     if reset:
+        try:
+            st = load_state()
+            st[key] = None  # None 触发数据库 DELETE
+            save_state(st)
+        except Exception:
+            pass
+        # 恢复内置版：同时写回规则文件，避免文件残留旧内容
+        builtin = globals()["_BUILTIN_" + const_name]
         p = os.path.join(RULES_DIR, name + ".md")
-        if os.path.exists(p):
-            os.remove(p)
-        globals()[const_name] = globals()["_BUILTIN_" + const_name]
+        try:
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(builtin)
+        except Exception:
+            pass
+        globals()[const_name] = builtin
         return True
     content = str(content or "").strip()
     if not content:
         raise ValueError("规则内容不能为空")
+    try:
+        st = load_state()
+        st[key] = content
+        save_state(st)
+    except Exception as e:
+        raise ValueError(f"规则写入数据库失败：{e}")
     p = os.path.join(RULES_DIR, name + ".md")
     with open(p, "w", encoding="utf-8") as f:
         f.write(content)
@@ -2531,7 +2927,8 @@ def llm_text_to_script(text, token="", segments=0):
             + user_content
         )
     resp = lmstudio_chat([
-        {"role": "system", "content": SCRIPT_TEXT_SYSTEM},
+        {"role": "system", "content": str(SCRIPT_TEXT_SYSTEM or "")
+         + _rule_block("script_continuity")},
         {"role": "user", "content": user_content},
     ], token)
     content = resp.get("choices", [{}])[0].get("message", {}).get("content", "")
@@ -2578,7 +2975,8 @@ def llm_generate_script(topic, style="", segments=10, token="", genre=""):
         + "请创作完整剧本 JSON。"
     )
     resp = lmstudio_chat([
-        {"role": "system", "content": SCRIPT_GEN_SYSTEM},
+        {"role": "system", "content": str(SCRIPT_GEN_SYSTEM or "")
+         + _rule_block("script_continuity")},
         {"role": "user", "content": user},
     ], token)
     content = resp.get("choices", [{}])[0].get("message", {}).get("content", "")
@@ -2595,7 +2993,8 @@ def llm_rewrite_script(script, token=""):
         + json.dumps(script, ensure_ascii=False, indent=1)
     )
     resp = lmstudio_chat([
-        {"role": "system", "content": SCRIPT_REWRITE_SYSTEM},
+        {"role": "system", "content": str(SCRIPT_REWRITE_SYSTEM or "")
+         + _rule_block("script_continuity")},
         {"role": "user", "content": user},
     ], token)
     content = resp.get("choices", [{}])[0].get("message", {}).get("content", "")
@@ -2697,7 +3096,7 @@ def _llm_endpoints():
     return local, cloud if cloud["enabled"] and cloud["url"] else None
 
 
-def _llm_openai(endpoint, messages, token="", timeout=1800):
+def _llm_openai(endpoint, messages, token="", timeout=1800, max_tokens=None):
     """OpenAI 兼容适配器：/v1/chat/completions。"""
     if not endpoint or not endpoint.get("url"):
         raise RuntimeError("语言模型端点未配置")
@@ -2706,8 +3105,13 @@ def _llm_openai(endpoint, messages, token="", timeout=1800):
         "model": endpoint.get("model") or _lm_model(),
         "messages": messages,
         "temperature": 0.6,
-        "max_tokens": 12000,
+        "max_tokens": max_tokens or 12000,
     }
+    # 本地 oMLX/LM Studio：关闭思考模式（与质检一致）。Qwen3 系列默认 thinking，
+    # 会把 max_tokens 全花在 reasoning 上导致 content 为空、看起来"卡住跑不完"
+    base = str(endpoint.get("url") or "").lower()
+    if "127.0.0.1" in base or "localhost" in base:
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
     req = urllib.request.Request(
         _v1(endpoint["url"]) + "/chat/completions",
         data=json.dumps(payload).encode("utf-8"),
@@ -2717,7 +3121,7 @@ def _llm_openai(endpoint, messages, token="", timeout=1800):
         return json.loads(r.read().decode("utf-8"))
 
 
-def _llm_claude(endpoint, messages, token="", timeout=1800):
+def _llm_claude(endpoint, messages, token="", timeout=1800, max_tokens=None):
     """Claude（Anthropic Messages API）适配器：POST /v1/messages。"""
     if not endpoint or not endpoint.get("url"):
         raise RuntimeError("语言模型端点未配置")
@@ -2725,7 +3129,7 @@ def _llm_claude(endpoint, messages, token="", timeout=1800):
     system = "\n".join(m["content"] for m in messages if m.get("role") == "system")
     chat = [{"role": m["role"], "content": m["content"]}
             for m in messages if m.get("role") != "system"]
-    payload = {"model": endpoint.get("model") or "claude-sonnet-4", "max_tokens": 12000}
+    payload = {"model": endpoint.get("model") or "claude-sonnet-4", "max_tokens": max_tokens or 12000}
     if system:
         payload["system"] = system
     payload["messages"] = chat
@@ -2745,7 +3149,7 @@ def _llm_claude(endpoint, messages, token="", timeout=1800):
     return {"choices": [{"message": {"content": text}}]}
 
 
-def _llm_dashscope(endpoint, messages, token="", timeout=1800):
+def _llm_dashscope(endpoint, messages, token="", timeout=1800, max_tokens=None):
     """通义千问（DashScope 原生）适配器：同步 text-generation。"""
     if not endpoint or not endpoint.get("url"):
         raise RuntimeError("语言模型端点未配置")
@@ -2753,7 +3157,7 @@ def _llm_dashscope(endpoint, messages, token="", timeout=1800):
     payload = {
         "model": endpoint.get("model") or "qwen-plus",
         "input": {"messages": messages},
-        "parameters": {"result_format": "message", "temperature": 0.6, "max_tokens": 12000},
+        "parameters": {"result_format": "message", "temperature": 0.6, "max_tokens": max_tokens or 12000},
     }
     req = urllib.request.Request(
         _strip_v1(endpoint["url"]) + "/api/v1/services/aigc/text-generation/generation",
@@ -2774,13 +3178,13 @@ _LLM_ADAPTERS = {
 }
 
 
-def _chat_once(endpoint, messages, token="", timeout=1800):
+def _chat_once(endpoint, messages, token="", timeout=1800, max_tokens=None):
     """按端点 provider_type 选择适配器调用；统一返回 OpenAI 兼容响应结构。"""
     if not endpoint or not endpoint.get("url"):
         raise RuntimeError("语言模型端点未配置")
     atype = str(endpoint.get("provider_type") or "openai").strip() or "openai"
     fn = _LLM_ADAPTERS.get(atype) or _LLM_ADAPTERS["openai"]
-    return fn(endpoint, messages, token, timeout)
+    return fn(endpoint, messages, token, timeout, max_tokens)
 
 
 def check_lmstudio(token="", timeout=6):
@@ -2814,9 +3218,13 @@ def boogu_check(timeout=4):
         req = urllib.request.Request(_v1(BOOGU_URL) + "/models", headers={"User-Agent": "batch-console"})
         with _opener().open(req, timeout=timeout) as r:
             data = json.loads(r.read().decode("utf-8"))
-        return {"ok": True, "models": [m.get("id") for m in data.get("data", [])]}
+        return {
+            "ok": True,
+            "models": [m.get("id") for m in data.get("data", [])],
+            "provider": str(_CONFIG["image_gen"].get("provider") or "local"),
+        }
     except Exception as e:
-        return {"ok": False, "error": str(e)}
+        return {"ok": False, "error": str(e), "provider": str(_CONFIG["image_gen"].get("provider") or "local")}
 
 
 def _image_gen_endpoints():
@@ -2930,12 +3338,17 @@ _IMG_ADAPTERS = {
 }
 
 
-def boogu_generate(prompt, filename, size="768x1024", timeout=300, refs=None, mode=None, people=None):
-    """文生图统一入口：provider=comfyui 走远程 MiniMax H3 Still，否则本地 Boogu 优先、失败降级云端。"""
+def boogu_generate(prompt, filename, size="768x1024", timeout=300, refs=None, mode=None, people=None, kind=""):
+    """文生图统一入口：provider=comfyui 全部走远程 MiniMax H3（refedit / FL2VA T2I），否则本地 Boogu 优先、失败降级云端。"""
     cfg = _CONFIG["image_gen"]
     if str(cfg.get("provider") or "local") == "comfyui":
+        if refs:
+            # 有参考图：H3 Still refedit（身份/场景锁定，参考强度取配置 0.75）
+            ctimeout = float((cfg.get("comfyui") or {}).get("timeout") or 900)
+            return _comfyui_still_generate(prompt, filename, size, ctimeout, refs=refs, mode=mode, people=people, kind=kind)
+        # 无参考图：直接 H3 FL2VA 纯文生图（核心节点纯文本条件），不再走 Boogu
         ctimeout = float((cfg.get("comfyui") or {}).get("timeout") or 900)
-        return _comfyui_still_generate(prompt, filename, size, ctimeout, refs=refs, mode=mode, people=people)
+        return _comfyui_still_generate(prompt, filename, size, ctimeout, refs=None, mode=None, people=people, kind=kind)
     main, backup = _image_gen_endpoints()
     last_err = None
     if main.get("provider") == "cloud":
@@ -2948,7 +3361,7 @@ def boogu_generate(prompt, filename, size="768x1024", timeout=300, refs=None, mo
                 raise
     # 本地 Boogu
     try:
-        return _boogu_local(prompt, filename, size, timeout)
+        return _boogu_local(prompt, filename, size, timeout, refs=refs)
     except Exception as e:
         last_err = e
         if backup and backup.get("provider") == "cloud":
@@ -2957,10 +3370,21 @@ def boogu_generate(prompt, filename, size="768x1024", timeout=300, refs=None, mo
         raise
 
 
-def _boogu_local(prompt, filename, size="768x1024", timeout=300):
+def _boogu_local(prompt, filename, size="768x1024", timeout=300, refs=None):
     """调本地 Boogu-Image 生成图片并保存到 素材/ 目录。返回 (filename, 绝对路径)。"""
     # 每次调用带随机 seed：重试/重新生成会得到不同画面（Boogu 未传 seed 时曾固定 42 出同一张图）
     payload = {"model": "boogu-image", "prompt": prompt, "size": size, "seed": random.randrange(2 ** 31)}
+    if refs:
+        # Boogu TI2I 多图拼底：全部参考图（场景图 + 角色锚点，最多 6 张）
+        # 由 Boogu 服务拼成参考板，编号对应提示词 <Picture N>
+        for r in refs[:6]:
+            abs_path = find_image(str(r)) or str(r)
+            if os.path.isfile(abs_path):
+                try:
+                    with open(abs_path, "rb") as f:
+                        payload.setdefault("refs", []).append(base64.b64encode(f.read()).decode())
+                except Exception:
+                    pass
     req = urllib.request.Request(
         BOOGU_URL + "/v1/images/generations",
         data=json.dumps(payload).encode("utf-8"),
@@ -2991,31 +3415,26 @@ def _parse_img_size(size):
     return w, h
 
 
-def _write_solid_png(path, width, height, rgb=(128, 128, 128)):
-    """纯标准库写纯色 PNG（H3 Still 纯文生图需要 edit_image 占位图）。"""
-    import struct
-    import zlib
+_STILL_WRAPPER = (
+    "Create one finished still image, not a collage, split screen, sequence, or duplicated subject. "
+    "Do not add motion, cuts, or audio.\n\nTarget image description: "
+)
 
-    def chunk(tag, data):
-        c = tag + data
-        return struct.pack(">I", len(data)) + c + struct.pack(">I", zlib.crc32(c) & 0xFFFFFFFF)
-
-    raw = b"".join(b"\x00" + bytes(rgb) * width for _ in range(height))
-    png = (
-        b"\x89PNG\r\n\x1a\n"
-        + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
-        + chunk(b"IDAT", zlib.compress(raw, 6))
-        + chunk(b"IEND", b"")
-    )
-    with open(path, "wb") as f:
-        f.write(png)
-    return path
+# 核心 MiniMaxH3ImageToVideo 的 length 按帧数落在 17k+5 网格；
+# direct_1_frame 需要实验性 image VAE，标准 video VAE 下统一用官方最短 5 帧档再取中间帧
+_T2I_LENGTH = {
+    "direct_1_frame": 5,
+    "micro_video_5_frames": 5,
+    "short_video_22_frames": 22,
+    "trained_124_frames": 124,
+}
 
 
-def _comfyui_still_generate(prompt, filename, size="768x1024", timeout=900, refs=None, mode=None, people=None):
-    """远程 ComfyUI MiniMax H3 Still 文生图（官方 T8 节点）。
+def _comfyui_still_generate(prompt, filename, size="768x1024", timeout=900, refs=None, mode=None, people=None, kind=""):
+    """远程 ComfyUI MiniMax H3 出图。
 
-    mode=t2i     : edit_image 用纯灰占位图，提示词纯文生图（场景图等无参考场景用）；
+    mode=t2i     : FL2VA 纯文生图——核心 MiniMaxH3ImageToVideo 纯文本条件 + 空 AV latent
+                   （fl2va unet，无参考图、无需占位图），采样后取中间帧；
     mode=refedit : edit_image=场景图（refs[0]），ref_images=角色锚点（refs[1:]），
                    画面人数/形象被参考图锁死，解决"多画第三人/多余肢体"问题。
     """
@@ -3034,77 +3453,94 @@ def _comfyui_still_generate(prompt, filename, size="768x1024", timeout=900, refs
     ref_imgs = refs[1:] if mode == "refedit" else []
     if mode == "refedit":
         ref_strength = float(cfg.get("reference_strength") or 0.75)
-        prompt = str(prompt or "") + " 环境与空间布局以 <Picture 1> 为基准。"
-        if ref_imgs:
-            role_tags = "、".join(f"<Picture {i + 2}>" for i in range(len(ref_imgs)))
-            try:
-                n = int(people) if people else 0
-            except (TypeError, ValueError):
-                n = 0
-            n = n or (1 if len(ref_imgs) == 1 else len(ref_imgs))
-            prompt += (
-                f" 参考图 {role_tags} 是同一批角色的多角度参考（同一个人可能有正面/侧面多张图），"
-                f" 画面中只允许出现这 {n} 个角色本人，"
-                " 每个角色的面容、发型、服装必须与对应参考图完全一致；"
-                " 绝对禁止出现参考图之外的任何第三人、多余肢体、多余手指、倒影或背景人物。"
-                " 人体结构：每个人的头部与身体必须自然衔接、无错位、无拼接感，颈部正常，"
-                " 姿态符合动作描述。"
-            )
+        prompt = str(prompt or "")
+        # 前端已在提示词里结构化输出【参考图解析】时不再重复追加
+        if "参考图解析" not in prompt:
+            if kind == "role":
+                prompt += (" 人物面部、五官、脸型与 <Picture 1> 完全一致（与参考图同一人）；"
+                           "发型与服装以本提示词描述为准，不沿用参考图的服装、配饰与背景"
+                           "（眼镜、标签、文字、logo 等一律不出现）；仅改变姿势、角度、表情与构图。")
+            elif kind == "scene":
+                prompt += " 空间布局、陈设与氛围以 <Picture 1> 为基准，排除其原图构图与机位。"
+            else:
+                prompt += " 环境与空间布局以 <Picture 1> 为基准。"
+            if ref_imgs:
+                role_tags = "、".join(f"<Picture {i + 2}>" for i in range(len(ref_imgs)))
+                try:
+                    n = int(people) if people else 0
+                except (TypeError, ValueError):
+                    n = 0
+                n = n or (1 if len(ref_imgs) == 1 else len(ref_imgs))
+                prompt += (
+                    f" 参考图 {role_tags} 是同一批角色的多角度参考（同一个人可能有正面/侧面多张图），"
+                    f" 画面中只允许出现这 {n} 个角色本人，"
+                    " 每个角色的面容、发型、服装必须与对应参考图完全一致；"
+                    " 绝对禁止出现参考图之外的任何第三人、多余肢体、多余手指、倒影或背景人物。"
+                    " 人体结构：每个人的头部与身体必须自然衔接、无错位、无拼接感，颈部正常，"
+                    " 姿态符合动作描述。"
+                )
     else:
-        ref_strength = float(cfg.get("t2i_reference_strength") or 0.2)
+        # FL2VA 纯文生图：换 fl2va unet，提示词加"单帧定格"包装（H3 Image Studio 同款），
+        # 不传任何图片——灰底占位图 + 低参考强度路径整体废弃
+        unet = str(cfg.get("t2i_unet") or unet)
+        prompt = _STILL_WRAPPER + str(prompt or "")
 
-    # 1) 准备 edit_image：refedit 用场景图，t2i 用纯灰占位图；上传到服务器 input 目录
+    # 1) 上传参考图（仅 refedit）；t2i 纯文本条件不需要任何图片
     if mode == "refedit":
         edit_local = find_image(refs[0])
         if not edit_local:
             raise RuntimeError(f"找不到场景参考图：{refs[0]}")
         edit_fn = os.path.basename(refs[0])
-    else:
-        edit_fn = f"_h3_still_placeholder_{width}x{height}.png"
-        edit_local = os.path.join(tempfile.gettempdir(), edit_fn)
-        if not os.path.isfile(edit_local):
-            _write_solid_png(edit_local, width, height)
-    upload_image(server, edit_local, edit_fn)
+        upload_image(server, edit_local, edit_fn)
+        for r in ref_imgs:
+            lp = find_image(r)
+            if not lp:
+                raise RuntimeError(f"找不到角色参考图：{r}")
+            upload_image(server, lp, os.path.basename(r))
 
-    # 2) 角色锚点参考图（ref_images，Picture 2+）
-    for r in ref_imgs:
-        lp = find_image(r)
-        if not lp:
-            raise RuntimeError(f"找不到角色参考图：{r}")
-        upload_image(server, lp, os.path.basename(r))
-
-    # 3) 构建 H3 Still API 图（官方 T8 节点结构，见 T8mars 官方示例）
+    # 2) 构建 API 图：t2i 用核心 FL2VA 条件节点，refedit 用 T8 参考图编辑节点
     graph = {
-        "1": {"class_type": "LoadImage", "inputs": {"image": edit_fn}},
         "2": {"class_type": "VAELoader", "inputs": {"vae_name": vae}},
         "3": {"class_type": "CLIPLoader", "inputs": {"clip_name": clip_name, "type": "minimax", "device": "default"}},
         "4": {"class_type": "UNETLoader", "inputs": {"unet_name": unet, "weight_dtype": "default"}},
     }
-    cond_inputs = {
-        "clip": ["3", 0],
-        "video_vae": ["2", 0],
-        "prompt": prompt,
-        "canvas_mode": "custom",
-        "width": width,
-        "height": height,
-        "target_mode": target_mode,
-        "reference_strength": ref_strength,
-        "audio_target": "generate_and_discard",
-        "strict_prompt_tags": True,
-        "ref_image_size": "match",
-        "edit_image": ["1", 0],
-    }
-    nid = 5
-    if ref_imgs:
-        for i, r in enumerate(ref_imgs, 1):
-            graph[str(nid)] = {"class_type": "LoadImage", "inputs": {"image": os.path.basename(r)}}
-            # V3 节点 autogrow 输入用打平点号键（ref_images.ref_image_N）
-            cond_inputs[f"ref_images.ref_image_{i}"] = [str(nid), 0]
-            nid += 1
-    graph[str(nid)] = {
-        "class_type": "MiniMaxH3StillConditioningT8",
-        "inputs": cond_inputs,
-    }
+    if mode == "refedit":
+        graph["1"] = {"class_type": "LoadImage", "inputs": {"image": edit_fn}}
+        cond_inputs = {
+            "clip": ["3", 0],
+            "video_vae": ["2", 0],
+            "prompt": prompt,
+            "canvas_mode": "custom",
+            "width": width,
+            "height": height,
+            "target_mode": target_mode,
+            "reference_strength": ref_strength,
+            "audio_target": "generate_and_discard",
+            "strict_prompt_tags": True,
+            "ref_image_size": "match",
+            "edit_image": ["1", 0],
+        }
+        nid = 5
+        if ref_imgs:
+            for i, r in enumerate(ref_imgs, 1):
+                graph[str(nid)] = {"class_type": "LoadImage", "inputs": {"image": os.path.basename(r)}}
+                # V3 节点 autogrow 输入用打平点号键（ref_images.ref_image_N）
+                cond_inputs[f"ref_images.ref_image_{i}"] = [str(nid), 0]
+                nid += 1
+        graph[str(nid)] = {"class_type": "MiniMaxH3StillConditioningT8", "inputs": cond_inputs}
+    else:
+        graph["5"] = {
+            "class_type": "MiniMaxH3ImageToVideo",
+            "inputs": {
+                "clip": ["3", 0],
+                "vae": ["2", 0],
+                "prompt": prompt,
+                "width": width,
+                "height": height,
+                "length": _T2I_LENGTH.get(target_mode, 5),
+            },
+        }
+        nid = 5
     cond_id = str(nid)
     nid += 1
     graph[str(nid)] = {
@@ -3159,16 +3595,35 @@ def _comfyui_still_generate(prompt, filename, size="768x1024", timeout=900, refs
     pid = resp.get("prompt_id")
     if not pid:
         raise RuntimeError(f"H3 Still 提交异常：{resp}")
+    _note_pending_pid(filename, pid)
     deadline = time.time() + float(timeout)
+    missing_streak = 0
     while time.time() < deadline:
         time.sleep(3)
         try:
             hist = api_get(server, f"/history/{pid}", timeout=15)
         except Exception:
+            missing_streak += 1
+            if missing_streak >= 3:
+                raise RuntimeError("远程任务丢失（ComfyUI 可能已重启），请重新生成")
             continue
         entry = (hist or {}).get(pid)
         if not entry:
+            # history 是远程内存存储，重启即丢：队列里还有 pid 说明仍在跑/排队；
+            # 队列和历史都没有 → 任务已丢失，快速失败而不是干等到超时
+            try:
+                q = api_get(server, "/queue", timeout=10)
+                active = {x[1] for x in q.get("queue_running", [])} | {x[1] for x in q.get("queue_pending", [])}
+            except Exception:
+                active = set()
+            if pid not in active:
+                missing_streak += 1
+                if missing_streak >= 3:
+                    raise RuntimeError("远程任务丢失（ComfyUI 可能已重启），请重新生成")
+            else:
+                missing_streak = 0
             continue
+        missing_streak = 0
         status = entry.get("status") or {}
         if status.get("status_str") == "error":
             msgs = json.dumps(status.get("messages") or [], ensure_ascii=False)[:300]
@@ -3229,23 +3684,31 @@ def _vision_config():
     return _VISION_ENV
 
 
-def vision_ask(image_path, prompt, timeout=120):
-    """调本地视觉服务（OpenAI 兼容，图片 base64）→ 返回文本。"""
+def vision_ask(image_path, prompt, refs=None, timeout=120):
+    """调本地视觉服务（OpenAI 兼容，图片 base64）→ 返回文本。
+    refs：参考图列表（文件名或绝对路径，按顺序附加在生成图之后，用于一致性检查）。"""
     cfg = _vision_config()
     base = cfg.get("DASHSCOPE_BASE_URL", "http://127.0.0.1:8001/v1")
     model = cfg.get("VISION_MODEL", "Qwen3.6-35B-A3B-8bit")
     key = cfg.get("DASHSCOPE_API_KEY", "")
-    with open(image_path, "rb") as f:
-        b64 = base64.b64encode(f.read()).decode()
-    ext = os.path.splitext(image_path)[1].lower().lstrip(".")
-    mime = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
-            "webp": "image/webp"}.get(ext, "image/jpeg")
+
+    def _img_item(p):
+        with open(p, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode()
+        ext = os.path.splitext(p)[1].lower().lstrip(".")
+        mime = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+                "webp": "image/webp"}.get(ext, "image/jpeg")
+        return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
+
+    content = [_img_item(image_path)]
+    for r in (refs or []):
+        abs_path = find_image(str(r)) or str(r)
+        if os.path.isfile(abs_path):
+            content.append(_img_item(abs_path))
+    content.append({"type": "text", "text": prompt})
     payload = {
         "model": model,
-        "messages": [{"role": "user", "content": [
-            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
-            {"type": "text", "text": prompt},
-        ]}],
+        "messages": [{"role": "user", "content": content}],
         "stream": False, "max_tokens": 1024,
     }
     # 本地 oMLX：关闭思考模式，让质检模型直接输出 JSON（实测 enable_thinking=false 输出干净稳定）
@@ -3264,71 +3727,57 @@ def vision_ask(image_path, prompt, timeout=120):
     return d.get("choices", [{}])[0].get("message", {}).get("content", "")
 
 
-def verify_asset(image_path, kind, expected=None, timeout=120):
-    """质检图片：角色（性别/服装）、场景（无人/无现代物品）、分镜（形象/穿帮）。"""
+def _asset_qc_question(kind, expected=None):
+    """从数据库规则 asset_qc 生成质检问题：按本次提示词 {PROMPT} + 设定信息检查。"""
     expected = expected or {}
+    rule = str(ASSET_QC_RULE or "")
+    view = expected.get("view")
     if kind == "role":
-        gender = expected.get("gender") or "未知"
-        look = expected.get("look") or ""
-        hair = expected.get("hair") or ""
-        costume = expected.get("costume") or ""
-        check_look = "；".join(x for x in [hair, costume] if x) or look
-        view = expected.get("view")
-        if view == "side":
-            q = (f"你是图片质检员。检查这张角色侧面参考图（90度正侧面），严格只输出 JSON："
-                 f"{{\"ok\": true或false, \"issues\": [\"问题1\", ...]}}\n"
-                 f"检查项：1. 人物侧面轮廓、发型、服装必须与设定一致：{check_look} "
-                 f"2. 侧面视角正常（人物侧身站立，面部朝向画面侧面，不要求正脸） "
-                 f"3. 画面干净：无多余肢体/多余手指、无重复人物、无文字乱码、无现代物品。\n"
-                 "ok=true 表示全部通过；否则 ok=false 并列出具体问题。")
-        elif view == "back":
-            q = (f"你是图片质检员。检查这张角色背面参考图，严格只输出 JSON："
-                 f"{{\"ok\": true或false, \"issues\": [\"问题1\", ...]}}\n"
-                 f"检查项：1. 背面视角正常（人物背对镜头，看不到正脸属正常） "
-                 f"2. 发型与服装必须与设定一致：{check_look} "
-                 f"3. 画面干净：无多余肢体/多余手指、无重复人物、无文字乱码、无现代物品。\n"
-                 "ok=true 表示全部通过；否则 ok=false 并列出具体问题。")
-        elif view == "face":
-            q = (f"你是图片质检员。检查这张角色脸部特写参考图，严格只输出 JSON："
-                 f"{{\"ok\": true或false, \"issues\": [\"问题1\", ...]}}\n"
-                 f"检查项：1. 五官清晰、面部占画面主体 2. 发型与设定一致：{hair or check_look} "
-                 f"3. 人物性别必须是「{gender}」 4. 画面干净：无多余肢体/手指、无重复人物、无文字乱码。\n"
-                 "ok=true 表示全部通过；否则 ok=false 并列出具体问题。")
-        else:
-            q = (f"你是图片质检员。检查这张角色锚点图，严格只输出 JSON：{{\"ok\": true或false, \"issues\": [\"问题1\", ...]}}\n"
-                 f"检查项：1. 人物性别必须是「{gender}」 2. 发型服装必须与设定一字不差一致：{check_look} "
-                 f"3. 画面干净：无多余肢体/多余手指、无重复人物、无文字乱码、无现代物品 "
-                 f"4. 面部清晰五官正常 5. 画面完整：整张图完整渲染，无大面积空白/灰色色块/未生成区域/半成品拼接。\n"
-                 f"若发型或服装与设定不符，必须列为问题（如'服装与设定不符：应为碎花连衣裙，实际是…'）。\n"
-                 "ok=true 表示全部通过；否则 ok=false 并列出具体问题。")
+        sec = {"side": "角色-侧面", "back": "角色-背面", "face": "角色-脸部"}.get(view or "", "角色")
     elif kind == "scene":
-        desc = expected.get("desc") or ""
-        desc_line = f"1. 场景必须与描述一致：{desc}" if desc else "1. 场景符合「1980年代中国乡村环境」"
-        q = ("你是图片质检员。检查这张场景参考图，严格只输出 JSON：{\"ok\": true或false, \"issues\": [...]}\n"
-             f"检查项：{desc_line} 2. 画面内无人物 "
-             "3. 无文字乱码 4. 无现代物品（路灯/汽车/塑料/现代包装等） "
-             "5. 画面完整：整张图完整渲染，无大面积空白/灰色色块/未生成区域/半成品拼接。\n"
-             "若场景与描述明显不符，必须列为问题。\n"
-             "ok=true 表示全部通过；否则 ok=false 并列出具体问题。")
+        sec = "场景"
     else:
-        look = expected.get("look") or ""
-        people = expected.get("people_count")
+        sec = "分镜"
+    m = re.search(rf"^##\s*{re.escape(sec)}\s*\n([\s\S]*?)(?=^\s*##|\Z)", rule, re.M)
+    tpl = (m.group(1).strip() if m else rule.strip()) or ""
+    prompt_txt = str(expected.get("prompt") or expected.get("desc") or expected.get("look") or "").strip()[:400]
+    gender = str(expected.get("gender") or "未知")
+    hair = str(expected.get("hair") or "")
+    costume = str(expected.get("costume") or "")
+    look = str(expected.get("look") or "")
+    check_look = "；".join(x for x in [hair, costume] if x) or look
+    people = expected.get("people_count")
+    people_line = ""
+    if people:
         people_line = (
-            f" 0. 画面里必须严格只有 {people} 个人（计数铁律：背景人物、画面边缘半身人、"
+            f"0. 画面里必须严格只有 {people} 个人（计数铁律：背景人物、画面边缘半身人、"
             "被遮挡的人、镜像/倒影人物都算人，必须全部计入，总数必须恰好为 "
             f"{people}，多一个即不通过）；如果无法明确清点人数，ok 必须为 false；"
             "绝对没有第三人、没有多余的肢体/手臂/手伸入画面"
-            if people else ""
         )
-        q = (f"你是图片质检员。检查这张分镜图，严格只输出 JSON：{{\"ok\": true或false, \"issues\": [...]}}\n"
-             f"检查项：{people_line} 1. 人物形象：{look} 2. 肢体完整：无多余手指/手臂/腿部异常纹理 "
-             "3. 人体结构：每个人的头部与身体必须自然衔接（无错位/拼接感/断头/头身朝向矛盾），"
-             "颈部正常不扭曲，姿势符合动作描述，两人互动位置关系合理 "
-             "4. 画面干净：无文字乱码、无重复人物、无现代物品、道具正常（无塑料包装盒/饮料瓶） "
-             "5. 画面完整：整张图完整渲染，无大面积空白/灰色色块/未生成区域/半成品拼接。\n"
-             "ok=true 表示全部通过；否则 ok=false 并列出具体问题。")
+    return (tpl
+            .replace("{PROMPT}", prompt_txt or "（未提供提示词，按常规标准检查）")
+            .replace("{GENDER}", gender)
+            .replace("{LOOK}", check_look or "（未提供设定，按提示词判断）")
+            .replace("{PEOPLE_LINE}", people_line)).strip()
+
+
+def verify_asset(image_path, kind, expected=None, refs=None, timeout=120):
+    """质检图片：角色（性别/服装）、场景（无人/无现代物品）、分镜（形象/穿帮）。
+    refs 存在时，把参考图一并交给视觉模型，按 inherit/exclude 规则做一致性检查。"""
+    expected = expected or {}
+    q = _asset_qc_question(kind, expected)
+    refs = [str(x) for x in (refs or []) if str(x).strip()]
+    if refs:
+        q = (q + "\n\n【参考图一致性检查】本次生成使用了 " + str(len(refs))
+             + " 张参考图（在生成图之后按顺序展示）。按 inherit/exclude 规则只检查继承属性："
+             + "角色参考图只继承身份/发型/服装/肤色，排除姿势/构图/背景/光线/调色；"
+             + "场景参考图只继承空间布局/陈设/氛围，排除构图/机位/光线；"
+             + "分镜底图只继承空间布局与人物身份。"
+             + "生成图中的人物身份/发型/服装必须与角色参考图一致，"
+             + "身份漂移、服装回退、参考图人物被生成成另一个人均判不通过。")
     try:
-        content = vision_ask(image_path, q, timeout)
+        content = vision_ask(image_path, q, refs=refs, timeout=timeout)
     except Exception as e:
         # 质检服务不可用 → 无法确认 → 判不通过（fail-closed，避免坏图被静默放行）
         return {"ok": False, "issues": [f"质检服务不可用：{e}"], "error": str(e)}
@@ -3395,8 +3844,9 @@ def _gen_asset_file(kind, key, prompt, expected=None, view=None, refs=None, mode
     tag = _ASSET_TAG.get(kind, kind)
     safe = re.sub(r'[\\/:*?"<>|]', '', str(key))[:20] or "x"
     last_fn, last_issues, attempts = None, [], 0
-    # 分镜图抽卡概率约 1/4（双人场景 Boogu 容易多画人），重试 8 次大幅提高出对概率
-    max_tries = 8 if kind == "story" else 3
+    # 分镜图每拍点一次只出一张（与单张路径一致）：质检不过也返回最后一张，
+    # 由上层登记并标注 ⚠️，用户自行决定是否重画；不再连环重试 8 次
+    max_tries = 1 if kind == "story" else 3
     for _ in range(max_tries):
         filename = f"{tag}_{safe}_{int(time.time() * 1000):x}_{random.randrange(16 ** 4):04x}.png"
         fn, dest = boogu_generate(
@@ -3404,20 +3854,19 @@ def _gen_asset_file(kind, key, prompt, expected=None, view=None, refs=None, mode
             refs=refs, mode=mode, people=(expected or {}).get("people_count"),
         )
         attempts += 1
-        # 确定性硬检查：大片纯灰/未生成区域直接判不过（视觉模型会当成暗角放过）
-        big_gray, gray_ratio = _has_big_gray_block(dest)
-        if big_gray:
-            last_fn, last_issues = fn, [f"画面存在大面积灰色/未生成区域（占比 {gray_ratio:.0%}），判不通过"]
-            time.sleep(1)
-            continue
-        v = verify_asset(dest, kind, expected)
+        # 确定性硬检查：仅无参考图时启用（H3 t2i 灰底占位路径）；
+        # 有真实参考图（refedit）会误伤软背景人像（实测 34-59% 平灰但图像质量正常），交给视觉质检
+        if not refs:
+            big_gray, gray_ratio = _has_big_gray_block(dest)
+            if big_gray:
+                last_fn, last_issues = fn, [f"画面存在大面积灰色/未生成区域（占比 {gray_ratio:.0%}），判不通过"]
+                time.sleep(1)
+                continue
+        v = verify_asset(dest, kind, expected, refs=refs)
         last_fn, last_issues = fn, v.get("issues", [])
         if v.get("ok"):
             return fn, True, [], attempts
         time.sleep(1)
-    # 分镜图人数是硬性指标：8 次质检都不过就不再入库，交给上层报错
-    if kind == "story" and not v.get("ok"):
-        raise ValueError(f"质检未通过（{max_tries} 次）：{'；'.join(last_issues)[:200] or '人数/穿帮异常'}")
     return last_fn, False, last_issues, attempts
 
 
@@ -3429,11 +3878,12 @@ def _register_asset(kind, key, filename, view=None, meta=None, shot=None):
     am = dict(proj.get("asset_meta") or {})
     ast = dict(proj.get("asset_state") or {})
     if kind == "role":
-        ai.setdefault("role", {})[str(key)] = filename
         ai.setdefault("roleViews", {}).setdefault(str(key), {})[view or "front"] = filename
         r = ast.setdefault("roles", {}).setdefault(str(key), {})
         r.setdefault("views", {})[view or "front"] = filename
         if not view or view == "front":
+            # 只有正面（锚点）才更新主图，避免脸部/侧面/背面把锚点覆盖成最后一张
+            ai.setdefault("role", {})[str(key)] = filename
             r["reference"] = filename
     elif kind == "scene":
         ai.setdefault("scene", {})[str(key)] = filename
@@ -3459,7 +3909,7 @@ def _register_asset(kind, key, filename, view=None, meta=None, shot=None):
 
 
 def _story_refs(proj, story_key):
-    """分镜图参考图：场景图（Picture 1）+ 出场角色正面锚点（Picture 2+）。"""
+    """分镜图参考图：场景图（Picture 1）+ 出场角色锚点（Picture 2+）。"""
     raw_key = ("" if story_key is None else str(story_key)).strip()
     m = re.fullmatch(r"[sS](\d+)", raw_key)
     if m:
@@ -3475,12 +3925,33 @@ def _story_refs(proj, story_key):
         return []
     ai = proj.get("asset_imgs") or {}
     scene_imgs = ai.get("scene") or {}
-    role_imgs = ai.get("role") or {}
-    role_views = ai.get("roleViews") or {}
     refs = []
     scene_name = str(_pick(seg, "scene", "location", "place", "scene_name") or "").strip()
     if scene_name and scene_imgs.get(scene_name):
         refs.append(scene_imgs[scene_name])
+    refs += _story_role_refs(proj, story_key)
+    return refs
+
+
+def _story_role_refs(proj, story_key):
+    """分镜出场角色锚点（正面 + 侧面），不含场景图；用于自定义参考图时叠加身份锁定。"""
+    raw_key = ("" if story_key is None else str(story_key)).strip()
+    m = re.fullmatch(r"[sS](\d+)", raw_key)
+    if m:
+        idx = int(m.group(1)) - 1
+    else:
+        try:
+            idx = int(raw_key)
+        except (TypeError, ValueError):
+            return []
+    sb = ((proj.get("current_script") or {}).get("storyboard_list")) or []
+    seg = sb[idx] if 0 <= idx < len(sb) else {}
+    if not seg:
+        return []
+    ai = proj.get("asset_imgs") or {}
+    role_imgs = ai.get("role") or {}
+    role_views = ai.get("roleViews") or {}
+    refs = []
     roles = seg.get("roles") or []
     if isinstance(roles, str):
         roles = [roles]
@@ -3499,10 +3970,18 @@ def _story_refs(proj, story_key):
     return refs
 
 
+def _story_refs_with_custom(proj, story_key, custom_refs):
+    """自定义参考图模式：Picture 1 = 上传的参考图，Picture 2+ = 出场角色锚点（身份锁定）。"""
+    custom = [str(x) for x in (custom_refs or []) if str(x).strip()]
+    if not custom:
+        return _story_refs(proj, story_key)
+    return list(dict.fromkeys(custom[:1] + _story_role_refs(proj, story_key)))
+
+
 def start_assets_batch_job(items):
     """服务端后台批量生图任务（每张立即保存，前端轮询进度，刷新页面可恢复）。"""
     tid = "assets_" + uuid.uuid4().hex[:10]
-    job = {"status": "queued", "done": 0, "total": len(items), "current": "", "error": None, "failed": []}
+    job = {"status": "queued", "done": 0, "total": len(items), "current": "", "error": None, "failed": [], "cancel": False}
     with ASSET_JOBS_LOCK:
         ASSET_JOBS[tid] = job
     st = load_state()
@@ -3517,6 +3996,8 @@ def start_assets_batch_job(items):
             still_cfg = _CONFIG.get("image_gen", {}).get("comfyui") or {}
             story_mode = str(still_cfg.get("story_mode") or "refedit")
             for i, item in enumerate(items):
+                if job.get("cancel"):
+                    break
                 kind = item.get("kind") or "story"
                 key = item.get("key")
                 prompt = str(item.get("prompt") or "").strip()
@@ -3529,10 +4010,14 @@ def start_assets_batch_job(items):
                     mode = item.get("mode")
                     shot = item.get("shot")
                     if kind == "story":
-                        if not refs:
+                        if refs:
+                            # 自定义参考图：Picture 1 = 上传的参考图，Picture 2+ = 角色锚点
+                            refs = _story_refs_with_custom(proj, key, refs)
+                            mode = "refedit"
+                        else:
                             refs = _story_refs(proj, key)
-                        if not mode:
-                            mode = story_mode
+                            if not mode:
+                                mode = story_mode
                     fn, ok, issues, attempts = _gen_asset_file(kind, key, prompt, expected, view, refs, mode)
                     _register_asset(kind, key, fn, view, {"verified": ok, "issues": issues, "attempts": attempts}, shot)
                 except Exception as e:
@@ -3540,14 +4025,17 @@ def start_assets_batch_job(items):
                     job["error"] = f"{label} 失败：{e}"
                     job["failed"].append({"label": label, "error": str(e)[:160]})
                 job["done"] = i + 1
-            job["status"] = "done"
+            if not job.get("cancel"):
+                job["status"] = "done"
         except Exception as e:
             job["status"] = "error"
             job["error"] = str(e)
         finally:
             job["current"] = ""
+            if job.get("cancel"):
+                job["status"] = "canceled"
             st = load_state()
-            st.pop("assets_gen_task", None)
+            st["assets_gen_task"] = None
             save_state(st)
 
     threading.Thread(target=work, daemon=True).start()
@@ -3583,8 +4071,13 @@ def llm_expand_storyboards(data, token=""):
         + "以下每个分镜扩写成完整 H3 三段式提示词。\n"
         + json.dumps(items, ensure_ascii=False, indent=1)
     )
+    routed = []
+    for it in items:
+        for r in _route_expand_rules(it):
+            if r not in routed:
+                routed.append(r)
     resp = lmstudio_chat([
-        {"role": "system", "content": H3_EXPAND_SYSTEM},
+        {"role": "system", "content": _expand_system_prompt(extra=routed)},
         {"role": "user", "content": user_content},
     ], token)
     content = resp.get("choices", [{}])[0].get("message", {}).get("content", "")
@@ -3858,8 +4351,25 @@ def to_ref2va_six_section(prompt, task=None):
     return "\n\n".join(sections)
 
 
-def llm_expand_one(sb, role_map, token="", prev_prompt=""):
-    """单段扩写 → 返回 H3 prompt。"""
+def llm_expand_one(sb, role_map, token="", prev_prompt="", timeout=None, max_tokens=None):
+    """单段扩写 → 返回 H3 prompt。
+
+    AI 输出限时限长：超时或返回空由调用方回退规则扩写，避免界面长时间无内容。
+    timeout / max_tokens 可经 config.json 的 llm.expand_timeout / llm.expand_max_tokens
+    调整（默认 600 秒 / 12000 token）。Qwen3 系列思考模型推理会占用大量 token，
+    max_tokens 太小会导致推理截断、正文为空。
+    """
+    llm_cfg = _CONFIG.get("llm", {}) or {}
+    if timeout is None:
+        try:
+            timeout = int(llm_cfg.get("expand_timeout") or 600)
+        except (TypeError, ValueError):
+            timeout = 600
+    if max_tokens is None:
+        try:
+            max_tokens = int(llm_cfg.get("expand_max_tokens") or 12000)
+        except (TypeError, ValueError):
+            max_tokens = 12000
     item = _storyboard_item(sb, role_map)
     asset_block = _asset_state_block()
     parts = []
@@ -3873,14 +4383,42 @@ def llm_expand_one(sb, role_map, token="", prev_prompt=""):
     parts.append("扩写下面这 1 个分镜为完整 H3 三段式提示词：\n" + json.dumps([item], ensure_ascii=False, indent=1))
     user_content = "\n\n".join(parts)
     resp = lmstudio_chat([
-        {"role": "system", "content": H3_EXPAND_SYSTEM},
+        {"role": "system", "content": _expand_system_prompt(item=item)},
         {"role": "user", "content": user_content},
-    ], token)
+    ], token, timeout=timeout, max_tokens=max_tokens)
     content = resp.get("choices", [{}])[0].get("message", {}).get("content", "")
-    arr = _extract_json_array(content)
-    if not arr:
+    p = _extract_llm_prompt(content)
+    if not p:
         raise RuntimeError("LLM 返回内容无法解析")
-    return str(arr[0].get("prompt", "")).strip()
+    return p
+
+
+def _extract_llm_prompt(content):
+    """从 LLM 输出提取 H3 prompt：兼容 JSON 数组 / {"prompt":...} / 直接三段式文本。"""
+    s = str(content or "").strip()
+    if not s:
+        return ""
+    arr = _extract_json_array(s)
+    if arr:
+        for x in arr:
+            p = str(x.get("prompt") or "").strip()
+            if p:
+                return p
+    # 单个 JSON 对象 {"id":1,"prompt":"..."}
+    m = re.search(r"\{[\s\S]*?\"prompt\"\s*:\s*\"([\s\S]*?)\"\s*\}", s)
+    if m:
+        try:
+            obj = json.loads(m.group(0))
+            p = str(obj.get("prompt") or "").strip()
+            if p:
+                return p
+        except Exception:
+            pass
+    # 直接三段式文本：剥 markdown 围栏与首尾废话
+    plain = re.sub(r"```(?:json|JSON)?\s*([\s\S]*?)```", r"\1", s).strip()
+    if "integrated_multimodal_description" in plain and "overall_soundscape" in plain:
+        return plain
+    return ""
 
 
 def start_expand_job(text, token=""):
@@ -3936,12 +4474,10 @@ def start_expand_job(text, token=""):
                     prev_p = p
                     _save_expand_progress(rows, tid)  # 每段立即保存
                 else:
-                    print(f"[expand] 第 {i + 1} 段扩写失败，回退规则", flush=True)
-                    own = str(_pick(sb, "prompt", "video_prompt", "text", "description") or "").strip()
-                    rows[i]["prompt"] = (
-                        enhance_prompt(optimize_prompt_block(own, rows[i]["duration"]), rows[i])
-                        if own else compose_storyboard_prompt(sb, role_map, detailed=True)
-                    )
+                    # AI 失败不再静默回退旧模板：留空并在进度里标记失败段，方便重试
+                    print(f"[expand] 第 {i + 1} 段 AI 扩写失败，留空待重试", flush=True)
+                    rows[i]["prompt"] = ""
+                    job.setdefault("failed", []).append(i + 1)
                 job["done"] = i + 1
             job["tasks"] = rows
             job["meta"] = meta
@@ -3986,7 +4522,7 @@ def _save_expand_progress(rows, tid, final=False):
             projects[proj["name"]] = snap
             st["projects"] = projects
         if final:
-            st.pop("expand_task", None)
+            st["expand_task"] = None
         save_state(st)
         return True
     except Exception:
@@ -4013,7 +4549,8 @@ def llm_polish_prompts(rows, token=""):
         + json.dumps(items, ensure_ascii=False, indent=1)
     )
     resp = lmstudio_chat([
-        {"role": "system", "content": H3_POLISH_SYSTEM},
+        {"role": "system", "content": str(H3_POLISH_SYSTEM or "")
+         + _rule_block("prompt_preservation")},
         {"role": "user", "content": user_content},
     ], token)
     content = resp.get("choices", [{}])[0].get("message", {}).get("content", "")
@@ -4035,7 +4572,7 @@ def llm_polish_prompts(rows, token=""):
     return rows
 
 
-def lmstudio_chat(messages, token="", timeout=1800):
+def lmstudio_chat(messages, token="", timeout=1800, max_tokens=None):
     """语言模型统一调用：按配置走本地或云端 OpenAI 兼容接口，主端点失败自动降级备用。"""
     main, backup = _llm_endpoints()
     last_err = None
@@ -4043,7 +4580,7 @@ def lmstudio_chat(messages, token="", timeout=1800):
         if not ep or not ep.get("url"):
             continue
         try:
-            return _chat_once(ep, messages, token, timeout)
+            return _chat_once(ep, messages, token, timeout, max_tokens)
         except Exception as e:
             last_err = e
             print(f"[llm] {ep.get('provider')} 调用失败：{e}", flush=True)
@@ -4067,10 +4604,8 @@ def expand_script_json_llm(text, token=""):
             row["prompt"] = _normalize_llm_prompt(p)
         else:
             own = str(_pick(sb, "prompt", "video_prompt", "text", "description") or "").strip()
-            row["prompt"] = (
-                enhance_prompt(optimize_prompt_block(own, row["duration"]), row)
-                if own else compose_storyboard_prompt(sb, role_map, detailed=True)
-            )
+            # AI 缺段时不再回退旧模板：有原文 prompt 才补全，否则留空待重试
+            row["prompt"] = (enhance_prompt(optimize_prompt_block(own, row["duration"]), row) if own else "")
     return rows, meta
 
 
@@ -4532,6 +5067,7 @@ class Handler(BaseHTTPRequestHandler):
             resp = {
                 "status": job["status"], "done": job["done"], "total": job["total"],
                 "current": job["current"], "error": job["error"],
+                "failed": job.get("failed") or [],
             }
             if job["status"] in ("done", "error"):
                 resp["tasks"] = job["tasks"]
@@ -4546,7 +5082,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             job = EXPAND_JOBS.get(et.get("task_id"))
             if not job:
-                st.pop("expand_task", None)
+                st["expand_task"] = None
                 save_state(st)
                 self._send(200, json.dumps({"active": False, "lost": True}, ensure_ascii=False))
                 return
@@ -4576,9 +5112,15 @@ class Handler(BaseHTTPRequestHandler):
                 return
             job = ASSET_JOBS.get(et.get("task_id"))
             if not job:
-                st.pop("assets_gen_task", None)
+                st["assets_gen_task"] = None
                 save_state(st)
                 self._send(200, json.dumps({"active": False, "lost": True}, ensure_ascii=False))
+                return
+            if job.get("status") in ("done", "error", "canceled"):
+                # 任务已结束：清掉残留状态，避免刷新后误报"未完成的参考图生成"
+                st["assets_gen_task"] = None
+                save_state(st)
+                self._send(200, json.dumps({"active": False, "last_status": job.get("status")}, ensure_ascii=False))
                 return
             self._send(200, json.dumps({
                 "active": True, "task_id": et["task_id"],
@@ -4586,10 +5128,34 @@ class Handler(BaseHTTPRequestHandler):
                 "current": job["current"], "error": job["error"], "failed": job.get("failed", []),
             }, ensure_ascii=False))
             return
+        if path.path == "/api/assets_gen_cancel":
+            # 用户清空参考图时调用：取消正在运行/排队的批量生图，避免"删了还在生成"
+            st = load_state()
+            et = st.get("assets_gen_task")
+            if et:
+                job = ASSET_JOBS.get(et.get("task_id"))
+                if job:
+                    job["cancel"] = True
+                st["assets_gen_task"] = None
+                save_state(st)
+            self._send(200, json.dumps({"ok": True}, ensure_ascii=False))
+            return
         self._send(404, "not found", "text/plain; charset=utf-8")
 
     def do_POST(self):
         path = urllib.parse.urlparse(self.path).path
+        if path == "/api/assets_gen_cancel":
+            # 停止按钮/清空参考图调用（无 body）：取消正在运行/排队的批量生图
+            st = load_state()
+            et = st.get("assets_gen_task")
+            if et:
+                job = ASSET_JOBS.get(et.get("task_id"))
+                if job:
+                    job["cancel"] = True
+                st["assets_gen_task"] = None
+                save_state(st)
+            self._send(200, json.dumps({"ok": True}, ensure_ascii=False))
+            return
         try:
             body = self._read_json()
         except Exception:
@@ -4628,44 +5194,111 @@ class Handler(BaseHTTPRequestHandler):
             kind = body.get("kind", "story")
             key = body.get("key")
             expected = body.get("expected") or {}
+            shot = body.get("shot")
+            _orig_filename = filename  # 重试会改 filename，清理待恢复记录用原始名
             if not prompt.strip() or not filename.strip():
                 self._send(400, json.dumps({"error": "缺少 prompt 或 filename"}, ensure_ascii=False))
                 return
-            # 分镜图走参考编辑模式：场景图 + 出场角色锚点（与批量任务一致）
-            refs, mode = None, None
+            # 分镜去重：同一段同一拍已在生成/排队时，拒绝重复点击
+            dedupe_key = None
             if kind == "story":
-                st0 = load_state()
-                proj = dict(st0.get("project") or {})
-                refs = _story_refs(proj, key)
-                still_cfg = _still_cfg()
-                mode = str(still_cfg.get("story_mode") or "refedit")
-            attempts = 0
-            last_fn, last_issues = None, []
-            max_tries = 8 if kind == "story" else 3
-            while attempts < max_tries:
                 try:
-                    fn, dest = boogu_generate(prompt, filename, "768x1024", refs=refs, mode=mode)
-                except Exception as e:
-                    self._send(400, json.dumps({"error": f"Boogu 生图失败：{e}"}, ensure_ascii=False))
-                    return
-                attempts += 1
-                v = verify_asset(dest, kind, expected)
-                last_fn, last_issues = fn, v.get("issues", [])
-                if v.get("ok"):
-                    self._send(200, json.dumps({
-                        "filename": fn, "verified": True, "issues": [],
-                        "attempts": attempts,
-                    }, ensure_ascii=False))
-                    return
-                # 换文件名重试（保留失败版本供对比）
-                filename = re.sub(
-                    r"_([a-z0-9]+)(\.(?:png|jpg|jpeg|webp))$",
-                    lambda m: f"_{int(time.time() * 1000):x}{m.group(2)}", fn,
-                )
-            self._send(200, json.dumps({
-                "filename": last_fn, "verified": False, "issues": last_issues,
-                "attempts": attempts,
-            }, ensure_ascii=False))
+                    shot_no = int(shot) if shot else 1
+                except (TypeError, ValueError):
+                    shot_no = 1
+                dedupe_key = f"{str(key)}:{shot_no}"
+                with ASSET_JOBS_LOCK:
+                    if dedupe_key in _STORY_GEN_IN_FLIGHT:
+                        self._send(409, json.dumps({
+                            "error": f"分镜 {str(key)} 拍{shot_no} 正在生成中（已在队列），请勿重复点击",
+                        }, ensure_ascii=False))
+                        return
+                    _STORY_GEN_IN_FLIGHT.add(dedupe_key)
+            try:
+                # 分镜图走参考编辑模式：场景图 + 出场角色锚点（与批量任务一致）
+                refs, mode = None, None
+                if kind == "story":
+                    st0 = load_state()
+                    proj = dict(st0.get("project") or {})
+                    still_cfg = _still_cfg()
+                    body_refs = [str(x) for x in (body.get("refs") or []) if str(x).strip()]
+                    if body_refs:
+                        # 自定义参考图：Picture 1 = 上传的参考图，Picture 2+ = 角色锚点
+                        refs = _story_refs_with_custom(proj, key, body_refs)
+                        mode = "refedit"
+                    else:
+                        refs = _story_refs(proj, key)
+                        mode = str(still_cfg.get("story_mode") or "refedit")
+                else:
+                    # 角色/场景生成支持手动参考图（H3 refedit：身份/场景锁定）
+                    refs = [str(x) for x in (body.get("refs") or []) if str(x).strip()]
+                    mode = "refedit" if refs else None
+                if kind == "story":
+                    # 提交前落盘待恢复记录：进程被杀/重启后仍能凭 prompt_id 从远程补回结果
+                    _PENDING_ASSETS[filename] = {
+                        "pid": None, "kind": kind, "key": key, "shot": shot,
+                        "filename": filename, "expected": expected,
+                        "refs": refs, "mode": mode, "prompt": prompt, "ts": time.time(),
+                    }
+                    _persist_pending_assets()
+                attempts = 0
+                last_fn, last_issues = None, []
+                max_tries = 1  # 单张分镜：点一次只生成一张（质检不过也登记并标注，避免连环重生成）
+                while attempts < max_tries:
+                    try:
+                        fn, dest = boogu_generate(prompt, filename, "768x1024", refs=refs, mode=mode, kind=kind)
+                    except Exception as e:
+                        self._send(400, json.dumps({"error": f"Boogu 生图失败：{e}"}, ensure_ascii=False))
+                        return
+                    attempts += 1
+                    # 确定性硬检查：仅无参考图时启用（与批量路径一致），有参考图交给视觉质检
+                    if not refs:
+                        big_gray, gray_ratio = _has_big_gray_block(dest)
+                        if big_gray:
+                            last_fn, last_issues = fn, [f"画面存在大面积灰色/未生成区域（占比 {gray_ratio:.0%}），判不通过"]
+                            filename = re.sub(
+                                r"_([a-z0-9]+)(\.(?:png|jpg|jpeg|webp))$",
+                                lambda m: f"_{int(time.time() * 1000):x}{m.group(2)}", fn,
+                            )
+                            continue
+                    v = verify_asset(dest, kind, expected, refs=refs)
+                    last_fn, last_issues = fn, v.get("issues", [])
+                    if v.get("ok"):
+                        if kind == "story":
+                            # 服务端直接登记（storyShots[key][shot]），不依赖前端内存保存，防止刷新/重启丢登记
+                            # 登记失败不影响已生成图片返回（前端仍会自行登记）
+                            try:
+                                _register_asset(kind, key, fn, None, {"verified": True, "issues": [], "attempts": attempts}, shot)
+                            except Exception as reg_e:
+                                print(f"[assets] 分镜登记失败（不影响出图）：{reg_e}", flush=True)
+                        self._send(200, json.dumps({
+                            "filename": fn, "verified": True, "issues": [],
+                            "attempts": attempts,
+                        }, ensure_ascii=False))
+                        return
+                    # 换文件名重试（保留失败版本供对比）
+                    filename = re.sub(
+                        r"_([a-z0-9]+)(\.(?:png|jpg|jpeg|webp))$",
+                        lambda m: f"_{int(time.time() * 1000):x}{m.group(2)}", fn,
+                    )
+                if kind == "story" and last_fn:
+                    # 质检不过也登记：用户能立刻看到图（带 ⚠️ 未通过标记），自行决定是否重画
+                    try:
+                        _register_asset(kind, key, last_fn, None,
+                                        {"verified": False, "issues": last_issues, "attempts": attempts}, shot)
+                    except Exception as reg_e:
+                        print(f"[assets] 失败图登记异常：{reg_e}", flush=True)
+                self._send(200, json.dumps({
+                    "filename": last_fn, "verified": False, "issues": last_issues,
+                    "attempts": attempts,
+                }, ensure_ascii=False))
+            finally:
+                if dedupe_key:
+                    with ASSET_JOBS_LOCK:
+                        _STORY_GEN_IN_FLIGHT.discard(dedupe_key)
+                # 请求正常结束（成功/失败）即清掉待恢复记录；被重启杀死的请求会保留供启动恢复
+                _PENDING_ASSETS.pop(_orig_filename, None)
+                _persist_pending_assets()
             return
         if path == "/api/asset_reverify":
             """给已有参考图补质检：遍历当前项目 asset_imgs，对缺质检记录的图
@@ -4678,6 +5311,12 @@ class Handler(BaseHTTPRequestHandler):
             am.setdefault("scene", {})
             am.setdefault("story", {})
             ast = proj.get("asset_state") or {}
+            ap = proj.get("asset_prompts") or {}
+            ap_role = ap.get("role") or {}
+            ap_scene = ap.get("scene") or {}
+            ap_story = ap.get("story") or {}
+            ap_shots = ap.get("storyShots") or {}
+            sb_list = ((proj.get("current_script") or {}).get("storyboard_list")) or []
             results = []
             # 角色
             for name, fn in (ai.get("role") or {}).items():
@@ -4693,6 +5332,7 @@ class Handler(BaseHTTPRequestHandler):
                     "hair": r.get("hair") or "",
                     "costume": r.get("costume") or "",
                     "look": "",
+                    "prompt": ap_role.get(name) or "",
                 }
                 v = verify_asset(lp, "role", expected)
                 am["role"][name] = {"verified": v.get("ok"), "issues": v.get("issues", []), "attempts": 1}
@@ -4705,7 +5345,9 @@ class Handler(BaseHTTPRequestHandler):
                 if not lp:
                     continue
                 s = ast.get("scenes", {}).get(name) or {}
-                v = verify_asset(lp, "scene", {"desc": s.get("desc") or ""})
+                # 场景质检参考：优先用保存的场景提示词；没有则只用场景名（不能用剧情动作，
+                # 里面全是人物，会导致误判"描述要求出现人"）
+                v = verify_asset(lp, "scene", {"prompt": ap_scene.get(name) or name or ""})
                 am["scene"][name] = {"verified": v.get("ok"), "issues": v.get("issues", []), "attempts": 1}
                 results.append({"kind": "scene", "key": name, **v})
             # 分镜
@@ -4715,7 +5357,10 @@ class Handler(BaseHTTPRequestHandler):
                 lp = find_image(str(fn))
                 if not lp:
                     continue
-                v = verify_asset(lp, "story", {"look": "", "people_count": None})
+                seg = sb_list[int(idx)] if str(idx).isdigit() and int(idx) < len(sb_list) else {}
+                people = max(len(seg.get("roles") or []), 1) if seg else None
+                prompt_txt = ((ap_shots.get(str(idx)) or {}).get("1")) or ap_story.get(str(idx)) or ""
+                v = verify_asset(lp, "story", {"look": "", "people_count": people, "prompt": prompt_txt})
                 am["story"][idx] = {"verified": v.get("ok"), "issues": v.get("issues", []), "attempts": 1}
                 results.append({"kind": "story", "key": idx, **v})
             proj["asset_meta"] = am
@@ -4729,6 +5374,39 @@ class Handler(BaseHTTPRequestHandler):
             save_state(st)
             self._send(200, json.dumps({"results": results, "meta": am}, ensure_ascii=False))
             return
+        if path == "/api/upload_ref_image":
+            """上传分镜参考图：存到素材目录根（find_image 只扫顶层），带参考_ 前缀防撞名。"""
+            filename = str(body.get("filename") or "").strip()
+            data_b64 = body.get("data_b64", "")
+            if not filename or not data_b64:
+                self._send(400, json.dumps({"error": "缺少文件名或内容"}, ensure_ascii=False))
+                return
+            ext = os.path.splitext(filename)[1].lower()
+            if ext not in (".png", ".jpg", ".jpeg", ".webp", ".gif"):
+                self._send(400, json.dumps({"error": "仅支持 png/jpg/jpeg/webp/gif 图片"}, ensure_ascii=False))
+                return
+            try:
+                raw = base64.b64decode(data_b64)
+                safe = re.sub(r'[\\/:*?"<>|]', '', os.path.basename(filename))
+                if ext == ".gif":
+                    # GIF 动图只取首帧转 PNG（H3 refedit 是静态图参考）
+                    import io as _io
+                    from PIL import Image
+                    img = Image.open(_io.BytesIO(raw)).convert("RGB")
+                    safe = os.path.splitext(safe)[0] + ".png"
+                    buf = _io.BytesIO()
+                    img.save(buf, "PNG")
+                    raw = buf.getvalue()
+                if not safe.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+                    safe += ".png"
+                dest_fn = f"参考_{int(time.time() * 1000):x}_{random.randrange(16 ** 4):04x}_{safe}"
+                with open(os.path.join(IMAGE_DIRS[0], dest_fn), "wb") as f:
+                    f.write(raw)
+            except Exception as e:
+                self._send(400, json.dumps({"error": f"上传失败：{e}"}, ensure_ascii=False))
+                return
+            self._send(200, json.dumps({"filename": dest_fn}, ensure_ascii=False))
+            return
         if path == "/api/upload_media":
             filename = str(body.get("filename") or "").strip()
             data_b64 = body.get("data_b64", "")
@@ -4737,7 +5415,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             try:
                 raw = base64.b64decode(data_b64)
-                dest = os.path.join(IMAGE_DIRS[0], filename)
+                dest = os.path.join(_ref_video_dir(), filename)
                 with open(dest, "wb") as f:
                     f.write(raw)
             except Exception as e:
@@ -4756,6 +5434,19 @@ class Handler(BaseHTTPRequestHandler):
                 st["lmstudio_model"] = str(body["lmstudio_model"]).strip()
                 save_state(st)
             self._send(200, json.dumps(check_lmstudio(token), ensure_ascii=False))
+            return
+        if path == "/api/image_gen_mode":
+            """参考资产页切换生图模式：本地 Boogu / 远程 ComfyUI H3（立即生效）。"""
+            provider = str(body.get("provider") or "").strip()
+            if provider not in ("local", "comfyui"):
+                self._send(400, json.dumps({"error": "provider 只支持 local / comfyui"}, ensure_ascii=False))
+                return
+            try:
+                cfg = _set_image_gen_provider(provider)
+            except Exception as e:
+                self._send(400, json.dumps({"error": f"切换失败：{e}"}, ensure_ascii=False))
+                return
+            self._send(200, json.dumps({"saved": True, "provider": cfg.get("image_gen", {}).get("provider")}, ensure_ascii=False))
             return
         if path == "/api/config":
             """保存配置：前端设置抽屉 → 写 config.json（自动备份旧文件）。"""
@@ -4915,9 +5606,8 @@ class Handler(BaseHTTPRequestHandler):
                         rows, meta = expand_script_json_llm(text, token)
                         llm_info = {"used": True}
                     except Exception as e:
-                        rows, meta = expand_script_json(text)
-                        llm_info = {"used": False, "fallback": str(e)}
-                        print(f"[expand] 剧本 AI 扩写失败，回退规则：{e}")
+                        self._send(400, json.dumps({"error": f"AI 扩写失败：{str(e)[:200]}"}, ensure_ascii=False))
+                        return
                 else:
                     rows, meta = expand_script_json(text)
                     if use_llm:
@@ -4949,6 +5639,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._send(400, json.dumps({"error": f"剧本生成失败：{e}"}, ensure_ascii=False))
                 return
+            _save_script_to_project(script, "before")  # 生成即落库
             self._send(200, json.dumps({"script": script}, ensure_ascii=False))
             return
         if path == "/api/rewrite_script":
@@ -4962,6 +5653,8 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._send(400, json.dumps({"error": f"剧本改写失败：{e}"}, ensure_ascii=False))
                 return
+            _save_script_to_project(script, "before")      # 原稿落库
+            _save_script_to_project(new_script, "after")   # 改写稿落库
             self._send(200, json.dumps({"script": new_script}, ensure_ascii=False))
             return
         if path == "/api/parse_script_text":
@@ -4983,6 +5676,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._send(400, json.dumps({"error": f"剧本转换失败：{e}"}, ensure_ascii=False))
                 return
+            _save_script_to_project(script, "before")  # 转换即落库
             self._send(200, json.dumps({"script": script}, ensure_ascii=False))
             return
         if path == "/api/project_delete":
@@ -5006,6 +5700,18 @@ class Handler(BaseHTTPRequestHandler):
                 snap = dict(cur)
                 snap["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
                 projects[cur["name"]] = snap
+            # 步骤记录（刷新后跳回用）：不依赖 name 分支，单独保存
+            if body.get("last_step") is not None and cur.get("name"):
+                try:
+                    cur["last_step"] = int(body["last_step"])
+                    st["project"] = cur
+                    snap = dict(cur)
+                    snap["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                    projects[cur["name"]] = snap
+                    st["projects"] = projects
+                    save_state(st)
+                except Exception:
+                    pass
             if body.get("name") is not None:
                 new_name = str(body.get("name") or "").strip() or "未命名项目"
                 old_name = str(cur.get("name") or "")
@@ -5047,7 +5753,7 @@ class Handler(BaseHTTPRequestHandler):
                 for k in ("script_before", "script_after", "current_script", "prompt_tasks",
                           "role_images", "scene_image", "chain_mode",
                           "asset_imgs", "asset_prompts", "asset_meta",
-                          "asset_state", "generation_log"):
+                          "asset_state", "generation_log", "last_step"):
                     if k in body:
                         proj[k] = body[k]
                 if body.get("prompt_tasks") is not None:
@@ -5192,7 +5898,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
             try:
                 resp = lmstudio_chat([
-                    {"role": "system", "content": ASSET_PROMPT_SYSTEM},
+                    {"role": "system", "content": str(ASSET_PROMPT_SYSTEM or "")
+                     + _rule_block("image_prompt_crafting") + _rule_block("negative_rules")},
                     {"role": "user", "content":
                         f"当前提示词：\n{current}\n\n修改要求：{instruction}\n\n请输出修改后的完整提示词。"},
                 ], token)
@@ -5208,19 +5915,30 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/story_prompt":
             sb = body.get("storyboard") or {}
             roles = body.get("roles") or []
+            h3_prompt = str(body.get("h3_prompt") or "").strip()
             token = _lm_token(body)
-            if not sb.get("scene") and not sb.get("action"):
-                self._send(400, json.dumps({"error": "分镜缺少场景或动作"}, ensure_ascii=False))
+            if not sb.get("scene") and not sb.get("action") and not h3_prompt:
+                self._send(400, json.dumps({"error": "分镜缺少场景或动作（也没有 H3 规范提示词）"}, ensure_ascii=False))
                 return
-            user = (
+            user_parts = []
+            if h3_prompt:
+                user_parts.append(
+                    "下面这是该分镜在第 4 步生成的 H3 规范提示词（作为内容来源，"
+                    "请把它转成单帧分镜图提示词：只取本拍的动作瞬间与构图，"
+                    "禁止把整段动作/对白/运镜/声音灌进画面，对白不视觉化）：\n"
+                    + h3_prompt[:4000]
+                )
+            user_parts.append(
                 "根据下面这个分镜生成分镜图提示词：\n"
                 + json.dumps({"storyboard": sb, "roles": roles}, ensure_ascii=False, indent=1)
             )
+            user = "\n\n".join(user_parts)
             try:
                 resp = lmstudio_chat([
-                    {"role": "system", "content": STORY_PROMPT_SYSTEM},
+                    {"role": "system", "content": str(STORY_PROMPT_SYSTEM or "")
+                     + _rule_block("image_prompt_crafting") + _rule_block("ref_shots")},
                     {"role": "user", "content": user},
-                ], token)
+                ], token, timeout=120, max_tokens=1500)
                 content = resp.get("choices", [{}])[0].get("message", {}).get("content", "").strip().strip('"')
                 if not content:
                     raise RuntimeError("AI 返回为空")
@@ -5228,6 +5946,88 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(400, json.dumps({"error": f"提示词生成失败：{e}"}, ensure_ascii=False))
                 return
             self._send(200, json.dumps({"prompt": content}, ensure_ascii=False))
+            return
+        if path == "/api/score_prompt":
+            prompt_txt = str(body.get("prompt") or "").strip()
+            context = str(body.get("context") or "").strip()
+            token = _lm_token(body)
+            if not prompt_txt:
+                self._send(400, json.dumps({"error": "缺少提示词"}, ensure_ascii=False))
+                return
+            system = (
+                str(QUALITY_RUBRIC_RULE or "")
+                + "\n\n你是提示词质检员。按上述九维评分表给提示词打分，严格只输出 JSON："
+                + '{"score": 总分, "grade": "A/B/C/D", '
+                + '"deductions": [{"dim": "维度名", "score": 该维度得分, "reason": "扣分原因"}], '
+                + '"issues": ["error/warning 级问题"], "suggestions": ["改进建议"]}。'
+                + "禁止输出其他任何文字。"
+            )
+            user = "按评分表对下面这条提示词打分：\n"
+            if context:
+                user += "剧本/分镜上下文（只用于判断忠实度，不是硬约束之外的新要求）：\n" \
+                    + context[:1500] + "\n\n"
+            user += "提示词：\n" + prompt_txt[:4000]
+            try:
+                resp = lmstudio_chat([
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ], token, timeout=180, max_tokens=2000)
+                content = resp.get("choices", [{}])[0].get("message", {}).get("content", "")
+                data = _extract_json_obj(content)
+                if not data:
+                    raise RuntimeError("评分返回无法解析为 JSON")
+                self._send(200, json.dumps({"score": data}, ensure_ascii=False))
+            except Exception as e:
+                self._send(400, json.dumps({"error": f"评分失败：{e}"}, ensure_ascii=False))
+            return
+        if path == "/api/batch_prompt_edit":
+            instruction = str(body.get("instruction") or "").strip()
+            prompts = body.get("prompts") or []
+            token = _lm_token(body)
+            if not instruction:
+                self._send(400, json.dumps({"error": "缺少修改指令"}, ensure_ascii=False))
+                return
+            if not isinstance(prompts, list) or not prompts:
+                self._send(400, json.dumps({"error": "没有可修改的提示词"}, ensure_ascii=False))
+                return
+            system = str(BATCH_PROMPT_EDIT_RULE or "")
+            if not system.strip():
+                self._send(400, json.dumps({"error": "批量修改规则未配置"}, ensure_ascii=False))
+                return
+            # 分块处理（每块 ≤5 段），避免一次塞太多上下文；结果按 id 合并，块内失败即整体失败
+            chunk_size = 5
+            results = {}
+            try:
+                for start in range(0, len(prompts), chunk_size):
+                    chunk = prompts[start:start + chunk_size]
+                    items = [
+                        {"id": start + i + 1, "prompt": str(p or "").strip()}
+                        for i, p in enumerate(chunk)
+                    ]
+                    user = (
+                        f"修改指令：{instruction}\n\n"
+                        "对下面每一段提示词应用完全相同的修改，逐段输出：\n"
+                        + json.dumps(items, ensure_ascii=False, indent=1)
+                    )
+                    resp = lmstudio_chat([
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ], token, timeout=300, max_tokens=6000)
+                    content = resp.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    arr = _extract_json_array(content)
+                    if not arr:
+                        raise RuntimeError("AI 返回无法解析为 JSON 数组")
+                    for x in arr:
+                        try:
+                            results[int(x.get("id"))] = str(x.get("prompt") or "").strip()
+                        except (TypeError, ValueError):
+                            continue
+                out = [results.get(i + 1, "") for i in range(len(prompts))]
+                if not any(out):
+                    raise RuntimeError("AI 返回结果为空")
+                self._send(200, json.dumps({"prompts": out}, ensure_ascii=False))
+            except Exception as e:
+                self._send(400, json.dumps({"error": f"批量修改失败：{e}"}, ensure_ascii=False))
             return
         if path == "/api/assemble":
             project_name = body.get("project_name", "")
@@ -5308,6 +6108,42 @@ class Handler(BaseHTTPRequestHandler):
             tasks = body.get("tasks", [])
             enhanced = [dict(t, prompt=enhance_prompt(t.get("prompt", ""), t)) for t in tasks]
             self._send(200, json.dumps({"tasks": enhanced}, ensure_ascii=False))
+            return
+        if path == "/api/expand_one":
+            script = body.get("script") or {}
+            try:
+                idx = max(0, int(body.get("index", 0)))
+            except (TypeError, ValueError):
+                idx = 0
+            prev_prompt = str(body.get("prev_prompt") or "").strip()
+            use_llm = bool(body.get("use_llm", True))
+            token = _lm_token(body)
+            if body.get("lmstudio_token"):
+                st = load_state()
+                st["lmstudio_token"] = str(body["lmstudio_token"]).strip()
+                save_state(st)
+            sbs = _extract_storyboards(script)
+            if not sbs:
+                self._send(400, json.dumps({"error": "剧本为空，无法重新扩写"}, ensure_ascii=False))
+                return
+            sb = sbs[idx] if idx < len(sbs) else sbs[0]
+            role_map = _extract_roles(script)
+            llm_info = {"used": False}
+            try:
+                if use_llm and check_lmstudio(token).get("available"):
+                    prompt = llm_expand_one(sb, role_map, token, prev_prompt=prev_prompt)
+                    llm_info = {"used": True}
+                else:
+                    # 仅当用户手动关闭「AI 智能扩写」时走规则补全；AI 模式失败不回退旧模板
+                    prompt = compose_storyboard_prompt(sb, role_map, detailed=True)
+                    llm_info = {"used": False, "fallback": "规则扩写" if not use_llm else "LM Studio 不可用，已回退规则扩写"}
+            except Exception as e:
+                self._send(400, json.dumps({"error": f"AI 扩写失败：{str(e)[:200]}"}, ensure_ascii=False))
+                return
+            if not str(prompt or "").strip():
+                self._send(400, json.dumps({"error": "AI 扩写返回空内容，请重试"}, ensure_ascii=False))
+                return
+            self._send(200, json.dumps({"prompt": prompt, "llm": llm_info}, ensure_ascii=False))
             return
         if path == "/api/clear_history":
             keep = body.get("keep") or None
@@ -5459,6 +6295,7 @@ def main():
     print(f"ComfyUI 批量控制台已启动：http://127.0.0.1:{port}")
     print(f"工作流目录：{DEFAULT_WORKFLOW_DIR}")
     print(f"默认服务器：{DEFAULT_SERVER}")
+    threading.Thread(target=_recover_pending_assets, daemon=True).start()
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

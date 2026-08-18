@@ -6,7 +6,7 @@
   - boogu-image-mlx 管线（https://github.com/xocialize/boogu-image-mlx）
   - 模型：
       BOOGU_MODEL  mlx-community/Boogu-Image-0.1-Turbo-8bit
-      BOOGU_QWEN   Qwen3-VL-8B-Instruct-4bit（prompt 理解辅助）
+      BOOGU_QWEN   Qwen3-VL-8B-Instruct-abliterated-v2-MLX-4bit（prompt 理解辅助，未审查）
 
 环境变量（均可覆盖，默认在 ~/.boogu 下）：
   BOOGU_PKG    boogu-image-mlx 目录
@@ -25,7 +25,7 @@ import time
 
 BOOGU_PKG = os.environ.get("BOOGU_PKG", os.path.expanduser("~/.boogu/boogu-image-mlx"))
 BOOGU_MODEL = os.environ.get("BOOGU_MODEL", os.path.expanduser("~/.boogu/models/Boogu-Image-0.1-Turbo-8bit"))
-BOOGU_QWEN = os.environ.get("BOOGU_QWEN", os.path.expanduser("~/.boogu/models/Qwen3-VL-8B-Instruct-4bit"))
+BOOGU_QWEN = os.environ.get("BOOGU_QWEN", os.path.expanduser("~/.boogu/models/Qwen3-VL-8B-Instruct-abliterated-v2-MLX-4bit"))
 BOOGU_PORT = int(os.environ.get("BOOGU_PORT", "8081"))
 IDLE_UNLOAD_SECONDS = 120
 
@@ -41,11 +41,34 @@ pipe = None
 _last_req = 0.0
 
 
+def _compose_ref_grid(images, cell=512, cols=2):
+    """多图拼底：把多张参考图拼成一张参考板（格子按从左到右、从上到下编号）。"""
+    rows = (len(images) + cols - 1) // cols
+    canvas = Image.new("RGB", (cols * cell, rows * cell), (255, 255, 255))
+    for i, im in enumerate(images):
+        r, c = divmod(i, cols)
+        thumb = im.copy()
+        thumb.thumbnail((cell, cell))
+        x = c * cell + (cell - thumb.width) // 2
+        y = r * cell + (cell - thumb.height) // 2
+        canvas.paste(thumb, (x, y))
+    return canvas
+
+
+_REF_LAYOUT_HINT = (
+    "输入图是参考图拼板：格子按从左到右、从上到下编号，与提示词中的 <Picture N> 一一对应。"
+    "生成时只继承对应编号格子的参考信息（身份/服装/场景/构图），"
+    "不要复刻拼板的网格、边框或拼接效果，输出必须是单张完整画面。\n\n"
+)
+
+
 def get_pipe():
     global pipe, _last_req
     if pipe is None:
         t0 = time.time()
         pipe = BooguImagePipeline.from_pretrained(BOOGU_MODEL, BOOGU_QWEN)
+        # TI2I 图像预处理处理器来自 Qwen3-VL 编码器目录（Boogu 模型目录没有 processor/）
+        pipe._proc_dir = BOOGU_QWEN
         print(f"[boogu] 模型加载完成: {time.time() - t0:.1f}s", flush=True)
     _last_req = time.time()
     return pipe
@@ -79,9 +102,10 @@ async def generate(request: Request):
     negative = body.get("negative", "")
     size = body.get("size", "1024x1024")
     n = min(int(body.get("n", 1)), 4)
-    steps = int(body.get("steps", 4))
-    guidance = float(body.get("guidance", 1.0))
+    steps = int(body.get("steps", 8))
+    guidance = float(body.get("guidance", 3.5))
     seed = body.get("seed")
+    refs = body.get("refs") or []
     if not prompt:
         return JSONResponse(status_code=400, content={"error": {"message": "prompt is required"}})
     try:
@@ -93,8 +117,31 @@ async def generate(request: Request):
     for i in range(n):
         s = (seed + i) if seed is not None else None
         seed_val = s if s is not None else random.randint(0, 2 ** 31 - 1)  # 未传 seed 时随机，避免每次同一张图
-        img = p.generate(prompt, negative=negative, height=h, width=w, steps=steps,
-                         guidance=guidance, seed=seed_val)
+        if refs:
+            # TI2I：单图直接编辑；多图拼成参考板，提示词前说明编号对应 <Picture N>
+            ref_images = []
+            for r in refs[:6]:
+                try:
+                    ref_images.append(Image.open(io.BytesIO(base64.b64decode(str(r)))).convert("RGB"))
+                except Exception:
+                    continue
+            if len(ref_images) == 1:
+                img = p.generate_edit(ref_images[0], prompt, height=h, width=w,
+                                      steps=int(body.get("steps", 8)),
+                                      text_guidance=float(body.get("guidance", 3.5)),
+                                      seed=seed_val)
+            elif ref_images:
+                canvas = _compose_ref_grid(ref_images)
+                img = p.generate_edit(canvas, _REF_LAYOUT_HINT + prompt, height=h, width=w,
+                                      steps=int(body.get("steps", 8)),
+                                      text_guidance=float(body.get("guidance", 3.5)),
+                                      seed=seed_val)
+            else:
+                img = p.generate(prompt, negative=negative, height=h, width=w, steps=steps,
+                                 guidance=guidance, seed=seed_val)
+        else:
+            img = p.generate(prompt, negative=negative, height=h, width=w, steps=steps,
+                             guidance=guidance, seed=seed_val)
         buf = io.BytesIO()
         Image.fromarray(img).save(buf, format="PNG")
         out.append({"b64_json": base64.b64encode(buf.getvalue()).decode()})

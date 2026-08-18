@@ -295,7 +295,7 @@
       </label>
       <div class="grid">
         <label class="field">风格
-          <input type="text" id="styleInput" placeholder="如：硬朗写实 / 赛博朋克 / 清新治愈（留空则跟随题材）">
+          <input type="text" id="styleInput" placeholder="必填，如：现代都市 / 1980年代中国乡村 / 硬朗写实 / 赛博朋克">
         </label>
         <label class="field">段数
           <input type="number" id="segmentsInput" value="10" min="3" max="20">
@@ -317,6 +317,7 @@
       <div class="desc">AI 理顺对白逻辑、优化动作衔接。左右对比，可继续改写，可手动编辑，确认后进入下一步。</div>
       <div class="row">
         <button class="btn blue" id="btnRewrite">🤖 AI 改写</button>
+        <button class="btn" id="btnReRewrite" title="对当前已确认/改写后的剧本，按最新规则（script_continuity）重新改写">🔄 重新改写</button>
         <button class="btn green" id="btnConfirmScript" disabled>✓ 确认使用改写后</button>
         <span class="hint" id="rewriteHint"></span>
       </div>
@@ -334,6 +335,8 @@
       <div class="desc">把剧本每段扩写成 H3 规范三段式提示词（环境 / 光线 / 动作 / 情绪 / 运镜 / 声音），可逐段编辑。</div>
       <div class="row">
         <button class="btn primary" id="btnBuildPrompts">✨ 生成 H3 规范提示词</button>
+        <button class="btn" id="btnClearPrompts" title="清空全部规范提示词，重新按最新规则扩写">🧹 清空提示词</button>
+        <button class="btn" id="btnBatchEditPrompts" title="一条指令应用到全部段落（替换/统一修改）">💬 AI 批量修改</button>
         <label style="font-size:12px;color:var(--muted)"><input type="checkbox" id="promptLlm" checked> AI 智能扩写（慢但完整）</label>
         <span class="hint" id="promptHint"></span>
       </div>
@@ -351,13 +354,25 @@
   <section class="panel" id="panel-5">
     <div class="card">
       <h2>参考资产 <span class="step-tag">第 5 步</span></h2>
-      <div class="desc">为角色生成锚点图、为场景生成参考图、为每段生成分镜图，保证生成视频时人物 / 场景 / 构图一致。生图默认走远程 ComfyUI MiniMax H3 Still（分镜图用场景+角色参考模式，稳定恰好 N 人），图自动存入 <code>素材/</code> 目录。</div>
+      <div class="desc">为角色生成锚点图、为场景生成参考图、为每段生成分镜图，保证生成视频时人物 / 场景 / 构图一致。生图模式可随时切换（本地 Boogu / 远程 ComfyUI H3 Still），图自动存入 <code>素材/</code> 目录。</div>
       <div class="row">
+        <label style="font-size:12px;color:var(--muted);white-space:nowrap">生图模式
+          <select id="imgGenMode" onchange="switchImgGenMode(this.value)" style="font-size:12px;padding:4px;margin-left:4px">
+            <option value="local">本地 Boogu</option>
+            <option value="comfyui">远程 ComfyUI H3</option>
+          </select>
+        </label>
         <span id="booguStatus" style="font-size:12px;color:var(--muted)">检测本地生图服务…</span>
         <span style="flex:1"></span>
         <button class="btn" id="btnReverifyAssets">🩺 补质检（已有图）</button>
         <button class="btn" id="btnClearAssets">🧹 清空已生成图</button>
+        <button class="btn" id="btnRemakeAssets" title="按第 4 步规范提示词重新填充角色/场景/分镜提示词并重新批量出图（相当于重制）">♻️ 重制全部</button>
         <button class="btn green" id="btnGenAllAssets">⚡ 一键生成全部参考图</button>
+      </div>
+      <div class="hint" style="font-size:11px;line-height:1.7;margin-top:4px">
+        🧹 清空 = 只清理不生成：移除图引用并重置提示词，需再点「一键生成」才重新出图。<br>
+        ♻️ 重制 = 清理 + 按第 4 步规范提示词重新填充提示词 + 全部重新出图（一步到位，所有图重画）。<br>
+        ⚡ 一键生成 = 只补缺失：已有图保留不动，缺的按最新规则（分镜拍1 自动 AI 转单帧）补出。
       </div>
       <label style="font-size:12px;color:var(--muted);margin-top:6px;display:inline-block">
         <input type="checkbox" id="genFourViews" checked> 角色四视图（正/脸/侧/背），取消则只生成正面锚点
@@ -366,7 +381,10 @@
         <div style="height:8px;background:#e2e8f0;border-radius:99px;overflow:hidden">
           <div id="assetBar" style="height:100%;width:0%;background:var(--blue);transition:width .4s"></div>
         </div>
-        <div class="hint" id="assetProgressText" style="font-size:11px;margin-top:4px"></div>
+        <div style="display:flex;align-items:center;gap:10px;margin-top:4px">
+          <div class="hint" id="assetProgressText" style="font-size:11px;flex:1"></div>
+          <button class="btn" id="btnStopAssets" style="padding:2px 10px;font-size:11px;color:var(--red);display:none" onclick="stopAssetsNow()">⏹ 停止生成</button>
+        </div>
       </div>
       <h3 style="font-size:14px;margin:16px 0 10px">📋 资产状态表 <span class="hint">（身份/状态分开；扩写与生图从这里取服装发型，一字不差，防止文字与参考图打架）</span></h3>
       <div id="assetStateBox"></div>
@@ -400,7 +418,7 @@
         <div class="row">
           <input type="file" id="videoUpload" accept="video/*" style="display:none">
           <button class="btn" id="btnUploadVideo">📤 上传参考视频</button>
-          <span class="hint" id="videoHint">上传后存到 <code>素材/</code> 目录，可在 R2V 链路里作为动作参考</span>
+          <span class="hint" id="videoHint">上传后存到 <code>素材/参考视频/</code>，列表只显示你上传的参考视频</span>
         </div>
         <div id="videoList" class="cards" style="margin-top:10px"></div>
       </div>
@@ -671,6 +689,28 @@
   </div>
 </div>
 
+<div class="modal-bg" id="scoreModalBg">
+  <div class="modal" style="width:min(680px,94vw)">
+    <h3>📊 提示词质量评分（quality_rubric · 100 分）</h3>
+    <div id="scoreBody" style="font-size:13px;line-height:1.8;max-height:60vh;overflow:auto;white-space:pre-wrap;font-family:ui-monospace,monospace"></div>
+    <div class="row" style="margin-top:12px;justify-content:flex-end">
+      <button class="btn" id="scoreModalClose">关闭</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-bg" id="batchEditModalBg">
+  <div class="modal" style="width:min(560px,92vw)">
+    <h3>💬 AI 批量修改全部段落</h3>
+    <div class="hint" id="batchEditHint" style="margin-bottom:10px">一条指令应用到所有提示词段落（如：把“浅蓝色连衣裙”全部改成“红色连衣裙” / 给所有段落加雨夜氛围）。未涉及的内容保持原样。</div>
+    <textarea id="batchEditIn" rows="3" style="width:100%" placeholder="例：把苏禾的“低马尾”全部改成“高马尾”；或者：所有段落统一把场景改成黄昏光线"></textarea>
+    <div class="row" style="margin-top:12px;justify-content:flex-end">
+      <button class="btn" id="batchEditCancel">取消</button>
+      <button class="btn primary" id="batchEditOk">✨ 应用到全部段落</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-bg" id="promptModalBg">
   <div class="modal" style="width:min(540px,92vw)">
     <h3>💬 对话修改生图提示词</h3>
@@ -795,6 +835,20 @@ function goStep(n) {
   if (n === 5) { renderAssets(); checkBoogu(); loadMedia(); }
   if (n === 4) renderPromptCards();
   window.scrollTo({top: 0, behavior: 'smooth'});
+  if (n >= 2 && n <= 8) saveLastStep(n);
+}
+
+let _stepSaveTimer = null;
+function saveLastStep(n) {
+  // 记录当前步骤到项目，刷新后自动跳回（防抖 600ms，避免每点一次都写库）
+  clearTimeout(_stepSaveTimer);
+  _stepSaveTimer = setTimeout(() => {
+    if (!currentProjectName) return;
+    fetch('/api/project', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({last_step: n}),
+    }).catch(() => {});
+  }, 600);
 }
 
 // ---------- Toast ----------
@@ -866,7 +920,7 @@ function resetWorkData() {
   currentScript = null;
   promptTasks = [];
   assetImgs = {role: {}, scene: {}, story: {}, storyShots: {}};
-  assetPrompts = {role: {}, scene: {}, story: {}};
+  assetPrompts = {role: {}, scene: {}, story: {}, storyShots: {}};
   assetMeta = {role: {}, scene: {}, story: {}};
   sceneNames = [];
   if ($('scriptTableWrap')) $('scriptTableWrap').innerHTML = '';
@@ -1037,6 +1091,10 @@ async function generateScript() {
   if (busy) { toast(`${busy}，请先等它完成后再生成剧本`, true); return; }
   const topic = $('topicInput').value.trim();
   if (!topic) { toast('请先填写剧情梗概', true); return; }
+  if (!$('styleInput').value.trim()) {
+    toast('请先填写「风格」（必填，如：现代都市 / 1980年代中国乡村 / 硬朗写实）', true);
+    return;
+  }
   const btn = $('btnGenScript');
   btn.disabled = true; btn.textContent = '🤖 AI 生成中（约 1-2 分钟）…';
   $('genHint').textContent = '';
@@ -1157,13 +1215,15 @@ function renderScriptCompare(script, elId) {
   </div>`).join('') || '<div class="empty">空</div>';
 }
 
-async function rewriteScript() {
-  const script = collectScriptFromTable() || scriptBefore;
+async function doRewrite(source, label) {
+  const script = source;
   if (!script || !(script.storyboard_list||[]).length) { toast('请先生成或导入剧本', true); return; }
   scriptBefore = script;
   renderScriptCompare(script, 'beforeScript');
   const btn = $('btnRewrite');
-  btn.disabled = true; btn.textContent = '🤖 改写中（约 1-2 分钟）…';
+  const btn2 = $('btnReRewrite');
+  btn.disabled = true; if (btn2) btn2.disabled = true;
+  btn.textContent = `${label}中（约 1-2 分钟）…`;
   $('rewriteHint').textContent = '';
   toastLoading('🤖 AI 正在改写剧本（约 1-2 分钟），完成前请勿关闭页面…');
   try {
@@ -1177,11 +1237,20 @@ async function rewriteScript() {
     scriptAfter = d.script;
     renderScriptCompare(d.script, 'afterScript');
     $('btnConfirmScript').disabled = false;
-    $('rewriteHint').textContent = '✅ 改写完成，右边是优化后的版本，可继续改写或确认';
+    $('rewriteHint').textContent = `✅ ${label}完成，右边是优化后的版本，可继续改写或确认`;
     toast('改写完成，请对比左右两侧');
     autoSaveProject(true);
   } catch (e) { toast('改写异常：' + e.message, true); }
-  finally { btn.disabled = false; btn.textContent = '🤖 AI 改写'; }
+  finally { btn.disabled = false; if (btn2) btn2.disabled = false; btn.textContent = '🤖 AI 改写'; }
+}
+
+function rewriteScript() {
+  doRewrite(collectScriptFromTable() || scriptBefore, '🤖 AI 改写');
+}
+
+function reRewriteScript() {
+  const source = currentScript || scriptAfter || collectScriptFromTable() || scriptBefore;
+  doRewrite(source, '🔄 重新改写');
 }
 
 function confirmScript() {
@@ -1277,6 +1346,17 @@ async function buildPrompts() {
   finally { btn.disabled = false; btn.textContent = '✨ 生成 H3 规范提示词'; }
 }
 
+function clearPrompts() {
+  // 清空全部规范提示词并落库：让「生成 H3 规范提示词」不再断点续跑跳过旧段，
+  // 全部按最新规则（h3_expand + ref_shots）重新扩写
+  if (!promptTasks.length) { toast('提示词已经是空的', true); return; }
+  if (!confirm('确定清空全部规范提示词吗？清空后需重新点「生成 H3 规范提示词」按最新规则重新扩写（手动修改会丢失）。')) return;
+  promptTasks = [];
+  renderPromptCards();
+  autoSaveProject(true);
+  toast('🧹 已清空，点「✨ 生成 H3 规范提示词」全部重新扩写（约 1 分钟/段）');
+}
+
 function renderPromptCards() {
   if (!promptTasks.length) {
     const hasScript = currentScript && (currentScript.storyboard_list || []).length > 0;
@@ -1306,7 +1386,158 @@ function renderPromptCards() {
       </select>
     </div>
     <textarea class="p-prompt" data-i="${i}">${esc(t.prompt)}</textarea>
+    <div class="foot" style="margin-top:6px;display:flex;gap:6px;justify-content:flex-end;align-items:center">
+      <span class="hint" style="font-size:11px">改动会自动保存</span>
+      <button class="btn" style="padding:3px 10px;font-size:12px" onclick="savePromptCard(${i})">💾 保存修改</button>
+      <button class="btn" style="padding:3px 10px;font-size:12px" onclick="scorePromptCard(${i})" title="按 quality_rubric 100 分量表评分">📊 评分</button>
+      <button class="btn" style="padding:3px 10px;font-size:12px" onclick="clearPromptCard(${i})" title="清空本段提示词，下次生成时按最新规则重新扩写">🧹 清空本段</button>
+      <button class="btn blue re-expand" data-i="${i}" style="padding:3px 10px;font-size:12px" onclick="reExpandCard(${i})">✨ 重新扩写</button>
+    </div>
   </div>`).join('');
+}
+
+function clearPromptCard(i) {
+  // 只清空本段：下次「生成 H3 规范提示词」时该段不再被断点续跑跳过，按最新规则重新扩写
+  const t = promptTasks[i];
+  if (!t) return;
+  if (!String(t.prompt || '').trim()) { toast(`第 ${i + 1} 段提示词已经是空的`, true); return; }
+  if (!confirm(`确定清空第 ${i + 1} 段提示词吗？下次「生成」会用最新规则重新扩写（手动修改会丢失）。`)) return;
+  t.prompt = '';
+  const ta = document.querySelector(`.p-prompt[data-i="${i}"]`);
+  if (ta) ta.value = '';
+  autoSaveProject(true);
+  toast(`🧹 第 ${i + 1} 段已清空，点「✨ 生成 H3 规范提示词」重新扩写`);
+}
+
+function savePromptCard(i) {
+  collectPromptTasks();
+  autoSaveProject(false);
+  toast(`✅ 第 ${i + 1} 段提示词已保存`);
+}
+
+async function scorePromptCard(i) {
+  const t = promptTasks[i];
+  if (!t) return;
+  const prompt = String(t.prompt || '').trim();
+  if (!prompt) { toast('提示词为空，无法评分', true); return; }
+  const sb = ((currentScript && currentScript.storyboard_list) || [])[i];
+  const context = sb
+    ? JSON.stringify({id: sb.id, scene: sb.scene, roles: sb.roles, action: sb.action,
+        dialogue: sb.dialogue, emotion: sb.emotion, camera: sb.camera, duration: sb.duration}, null, 1)
+    : '';
+  try {
+    const r = await fetch('/api/score_prompt', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({prompt, context, lmstudio_token: $('lmToken').value.trim()}),
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || '评分失败');
+    showScoreResult(d.score);
+  } catch (e) {
+    toast('评分失败：' + e.message, true);
+  }
+}
+
+function showScoreResult(s) {
+  if (!s) return;
+  const lines = [];
+  lines.push(`总分：${s.score ?? '?'} / 100 ｜ 评级：${s.grade ?? '?'}`);
+  if (s.deductions && s.deductions.length) {
+    lines.push('');
+    lines.push('── 各维度扣分 ──');
+    for (const d of s.deductions) lines.push(`• ${d.dim}：${d.score ?? '?'} 分 — ${d.reason || ''}`);
+  }
+  if (s.issues && s.issues.length) {
+    lines.push('');
+    lines.push('── 问题 ──');
+    for (const x of s.issues) lines.push(`• ${x}`);
+  }
+  if (s.suggestions && s.suggestions.length) {
+    lines.push('');
+    lines.push('── 改进建议 ──');
+    for (const x of s.suggestions) lines.push(`• ${x}`);
+  }
+  $('scoreBody').textContent = lines.join('\n');
+  $('scoreModalBg').style.display = 'flex';
+}
+
+function openBatchEditModal() {
+  const has = (promptTasks || []).some(t => String(t.prompt || '').trim());
+  if (!has) { toast('还没有可修改的提示词，请先生成 H3 规范提示词', true); return; }
+  $('batchEditIn').value = '';
+  $('batchEditModalBg').style.display = 'flex';
+  setTimeout(() => $('batchEditIn').focus(), 50);
+}
+
+async function doBatchEdit() {
+  const instruction = $('batchEditIn').value.trim();
+  if (!instruction) { toast('请输入修改指令', true); return; }
+  collectPromptTasks();
+  const prompts = (promptTasks || []).map(t => String(t.prompt || ''));
+  if (!prompts.some(p => p.trim())) { toast('没有可修改的提示词', true); return; }
+  const btn = $('batchEditOk');
+  const old = btn.innerHTML;
+  btn.disabled = true; btn.innerHTML = '修改中…（每块约 10-30 秒）';
+  try {
+    const r = await fetch('/api/batch_prompt_edit', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({instruction, prompts, lmstudio_token: $('lmToken').value.trim()}),
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || '批量修改失败');
+    const out = d.prompts || [];
+    if (out.length !== promptTasks.length) throw new Error('返回段落数与当前不一致，已放弃写入');
+    let changed = 0;
+    promptTasks.forEach((t, i) => {
+      const np = String(out[i] || '').trim();
+      if (np !== String(t.prompt || '').trim()) changed++;
+      t.prompt = np;
+    });
+    renderPromptCards();
+    autoSaveProject(true);
+    $('batchEditModalBg').style.display = 'none';
+    toast(`✅ 批量修改完成：${changed} 段已更新`);
+  } catch (e) {
+    toast('批量修改失败：' + e.message, true);
+  } finally {
+    btn.disabled = false; btn.innerHTML = old;
+  }
+}
+
+async function reExpandCard(i) {
+  const t = promptTasks[i];
+  const sb = ((currentScript && currentScript.storyboard_list) || [])[i];
+  if (!t) return;
+  if (!sb) { toast('找不到对应剧本段，无法重新扩写', true); return; }
+  if (!confirm(`重新扩写将按原剧本覆盖第 ${i + 1} 段当前提示词（手动修改会丢失），继续？`)) return;
+  const btn = document.querySelector(`.re-expand[data-i="${i}"]`);
+  const oldHtml = btn.innerHTML;
+  btn.disabled = true; btn.innerHTML = '扩写中…';
+  try {
+    const r = await fetch('/api/expand_one', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        script: {
+          title: currentScript.title || '剧本', logline: currentScript.logline || '',
+          role_list: currentScript.role_list || [], storyboard_list: [sb],
+        },
+        index: 0,
+        prev_prompt: i > 0 ? ((promptTasks[i - 1] || {}).prompt || '') : '',
+        use_llm: $('promptLlm').checked,
+        lmstudio_token: $('lmToken').value.trim(),
+      }),
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || '扩写失败');
+    promptTasks[i].prompt = d.prompt;
+    renderPromptCards();
+    autoSaveProject(true);
+    toast(d.llm && d.llm.used ? '✅ 重新扩写完成（AI）' : '✅ 重新扩写完成（规则兜底）');
+  } catch (e) {
+    toast('重新扩写失败：' + e.message, true);
+  } finally {
+    btn.disabled = false; btn.innerHTML = oldHtml;
+  }
 }
 
 async function busyReason() {
@@ -1372,12 +1603,16 @@ function pollExpandTask(tid) {
         if (pd.status === 'done') {
           promptTasks = pd.tasks || [];
           renderPromptCards();
-          $('promptHint').textContent = `✅ 已生成 ${promptTasks.length} 段规范提示词（AI 扩写），可直接编辑`;
-          toast('AI 扩写完成');
+          const failedNums = pd.failed || [];
+          $('promptHint').textContent = failedNums.length
+            ? `⚠️ 已生成 ${promptTasks.length} 段，${failedNums.length} 段 AI 扩写失败已留空（第 ${failedNums.join('、')} 段），请对失败段点「✨ 重新扩写」重试`
+            : `✅ 已生成 ${promptTasks.length} 段规范提示词（AI 扩写），可直接编辑`;
+          toast(failedNums.length ? `⚠️ ${failedNums.length} 段扩写失败，已留空待重试` : 'AI 扩写完成', failedNums.length > 0);
           autoSaveProject(true);
         } else {
           $('promptHint').textContent = '';
-          toast('扩写失败：' + (pd.error || '未知错误'), true);
+          const lost = pd.error && String(pd.error).indexOf('任务不存在') >= 0;
+          toast(lost ? '扩写任务已失效（服务可能重启过），请重新点击生成' : ('扩写失败：' + (pd.error || '未知错误')), true);
         }
       }
     } catch (e) {
@@ -2138,6 +2373,7 @@ async function loadImages() {
     const r = await fetch('/api/images');
     const d = await r.json();
     images = d.images || [];
+    mediaFiles = images;  // 角色/场景「生成参考」下拉用图片列表（勿被参考视频覆盖）
     const opts = '<option value="">无</option>' + images.map(f => `<option value="${f}">${f}</option>`).join('');
     $('roleImage1').innerHTML = opts;
     $('roleImage2').innerHTML = opts;
@@ -2152,11 +2388,31 @@ async function loadProject() {
     const p = d.project || {};
     // 每次加载项目先清空资产状态，防止上一个项目（或共享素材扫描）的图片残留
     assetImgs = {role: {}, scene: {}, story: {}, storyShots: {}};
-    assetPrompts = {role: {}, scene: {}, story: {}};
+    assetPrompts = {role: {}, scene: {}, story: {}, storyShots: {}};
+    rolePreview = {};
     assetMeta = {role: {}, scene: {}, story: {}};
-    assetState = {role: {}, scene: {}, story: {}};
+    assetState = {roles: {}, scenes: {}, storyShots: {}};
+    currentScript = null;
+    scriptBefore = null;
+    scriptAfter = null;
+    promptTasks = [];
     sceneNames = [];
     generationLog = [];
+    // 刷新后跳回"正在进行的页面"：优先项目记录的 last_step，老项目按内容估算
+    if (p.last_step && p.last_step >= 2 && p.last_step <= 8) {
+      resumeStep = p.last_step;
+    } else if (p.name) {
+      const hasAssets = !!(p.asset_imgs && (
+        Object.keys((p.asset_imgs.role || {})).length
+        || Object.keys((p.asset_imgs.scene || {})).length
+        || Object.keys((p.asset_imgs.story || {})).length));
+      if ((p.prompt_tasks || []).length || hasAssets) resumeStep = 5;
+      else if (p.script_after) resumeStep = 4;
+      else if (p.current_script || p.script_before) resumeStep = 3;
+      else resumeStep = 2;
+    } else {
+      resumeStep = 1;
+    }
     if (p.name) {
       currentProjectName = p.name;
       $('projectName').value = p.name;
@@ -2200,6 +2456,21 @@ async function loadProject() {
         }
       });
     }
+    // 修复历史脏数据：正面槽被背面/侧面图覆盖（旧版批量登记 bug 的产物）
+    Object.keys(assetImgs.roleViews || {}).forEach(n => {
+      const vw = assetImgs.roleViews[n];
+      const bad = (vw.back && vw.front === vw.back) ? vw.back
+        : ((vw.side && vw.front === vw.side) ? vw.side : '');
+      if (bad) {
+        delete vw.front;
+        if (assetImgs.role && assetImgs.role[n] === bad) delete assetImgs.role[n];
+        const st = assetState.roles && assetState.roles[n];
+        if (st) {
+          if (st.views) delete st.views.front;
+          if (st.reference === bad) delete st.reference;
+        }
+      }
+    });
     if (p.asset_prompts) assetPrompts = p.asset_prompts;
     if (p.asset_meta) assetMeta = p.asset_meta;
     if (p.asset_state) assetState = p.asset_state;
@@ -2225,6 +2496,10 @@ async function loadProject() {
       } catch (e) {}
     }
     savedProject = p;
+    // 统一重绘各步内容：空项目时清掉上一项目残留的脚本表/提示词卡/资产卡
+    renderScriptTable(currentScript);
+    renderPromptCards();
+    renderAssets();
     await renderProjects();
     renderGenLog();
   } catch (e) {}
@@ -2248,32 +2523,212 @@ function applyProjectSelections() {
 let assetImgs = {role: {}, scene: {}, story: {}, storyShots: {}};
 let assetPrompts = {role: {}, scene: {}, story: {}};
 let assetMeta = {role: {}, scene: {}, story: {}};
-let assetState = {roles: {}, scenes: {}};   // 资产状态表：身份/发型/服装/参考图/批准
+let assetState = {roles: {}, scenes: {}, storyShots: {}};   // 资产状态表：身份/发型/服装/参考图/批准
+let storyGenBusy = {};                                      // 分镜生成中状态：{seg:shot: true}（防重复点击）
+let rolePreview = {};                                       // 角色卡片大图当前预览的视图（front/face/side/back）
+let mediaFiles = [];                        // 素材/出镜素材 图片列表（生成参考图下拉用）
 let generationLog = [];                      // 生成记录：每次提交一个版本批次
 let sceneNames = [];
+let resumeStep = 1;                         // 刷新后要跳回的步骤（由项目 last_step 或内容推断）
+
+function previewRoleView(name, view) {
+  // 点击四视图小图 → 预览到卡片上方大图；再点大图可放大
+  rolePreview[name] = view;
+  const f = ((assetImgs.roleViews && assetImgs.roleViews[name]) || {})[view]
+    || ((assetImgs.roleViews && assetImgs.roleViews[name]) || {}).front
+    || assetImgs.role[name] || '';
+  const main = document.querySelector(`.role-main-img[data-name="${CSS.escape(name)}"]`);
+  if (main && f) {
+    main.src = '/media/' + encodeURIComponent(f);
+    main.style.display = 'block';
+    main.onclick = () => zoomImg('/media/' + encodeURIComponent(f));
+  }
+  // 高亮当前预览的小图
+  document.querySelectorAll(`.role-view-thumb[data-name="${CSS.escape(name)}"]`).forEach(el => {
+    el.style.borderColor = el.dataset.view === view ? 'var(--blue)' : 'transparent';
+  });
+}
+
+// ---------- 参考图解析模板（来自 rules/ref_link.md，不写死在代码里） ----------
+let refLinkTpl = null;
+let refLinkTplPromise = null;
+function ensureRefLinkTpl() {
+  if (refLinkTpl) return Promise.resolve(refLinkTpl);
+  if (!refLinkTplPromise) {
+    refLinkTplPromise = fetch('/api/rules')
+      .then(r => r.json())
+      .then(d => {
+        refLinkTpl = {};
+        const rule = (d.rules || []).find(x => x.name === 'ref_link');
+        if (rule && rule.content) {
+          rule.content.split('\n').forEach(line => {
+            const m = line.match(/^参考图解析-([^：:]+)：(.*)$/);
+            if (m) refLinkTpl[m[1].trim()] = m[2].trim();
+          });
+        }
+        return refLinkTpl;
+      })
+      .catch(() => { refLinkTpl = {}; return refLinkTpl; });
+  }
+  return refLinkTplPromise;
+}
+
+function attachRefLink(prompt, kind, ref) {
+  // 角色/场景单参考图：从规则模板生成【参考图解析】块（标签 + 用途 + 继承范围）
+  if (!ref) return prompt;
+  const tpl = refLinkTpl || {};
+  const key = kind === 'scene' ? '场景' : (kind === 'story' ? '底图' : '角色');
+  const line = (tpl[key] || '').replace(/\{标签\}/g, '1');
+  if (!line) return prompt;
+  const block = '【参考图解析】' + (tpl['标题'] || '本图使用 refedit 模式，自动关联：') + '\n- ' + line;
+  if (!prompt) return block;
+  return prompt.includes('参考图解析') ? prompt : prompt + '\n\n' + block;
+}
+
+function storyRefLinkBlock(i, customRef) {
+  // 分镜图参考图解析：<Picture 1> = 底图（自定义上传或本段场景图），
+  // <Picture 2+> = 出场角色锚点（正面/侧面，按后端 _story_refs 的连接顺序）
+  const tpl = refLinkTpl || {};
+  if (!tpl['锚点']) return '';
+  const s = (currentScript.storyboard_list || [])[i] || {};
+  const lines = [];
+  let tag = 1;
+  if (customRef) {
+    const base = (tpl['底图'] || '').replace(/\{标签\}/g, String(tag));
+    if (base) lines.push('- ' + base);
+    tag++;
+  } else {
+    const sceneName = s.scene || '';
+    const sceneImg = (assetImgs.scene && assetImgs.scene[sceneName]) || '';
+    if (sceneImg) {
+      const sc = (tpl['场景'] || '').replace(/\{标签\}/g, String(tag))
+        .replace(/\{场景名\}/g, sceneName);
+      if (sc) lines.push('- ' + sc);
+      tag++;
+    }
+  }
+  let roles = s.roles || [];
+  if (typeof roles === 'string') roles = [roles];
+  roles.forEach(n => {
+    const vw = (assetImgs.roleViews && assetImgs.roleViews[n]) || {};
+    const front = vw.front || (assetImgs.role && assetImgs.role[n]) || '';
+    const mk = (viewZh) => (tpl['锚点'] || '')
+      .replace(/\{标签\}/g, String(tag))
+      .replace(/\{角色名\}/g, n)
+      .replace(/\{视角\}/g, viewZh);
+    if (front) {
+      const l = mk('正面');
+      if (l) lines.push('- ' + l);
+      tag++;
+    }
+    if (vw.side) {
+      const l = mk('侧面');
+      if (l) lines.push('- ' + l);
+      tag++;
+    }
+  });
+  if (!lines.length) return '';
+  return '【参考图解析】' + (tpl['标题'] || '本图使用 refedit 模式，自动关联：') + '\n' + lines.join('\n');
+}
+
+function attachStoryRefBlock(prompt, i, customRef) {
+  const block = storyRefLinkBlock(i, customRef);
+  if (!block || prompt.includes('参考图解析')) return prompt;
+  return prompt + '\n\n' + block;
+}
+
+// ---------- 资产提示词默认模板（来自 rules/asset_tpl.md，不写死在代码里） ----------
+let assetTpl = null;
+let assetTplPromise = null;
+function ensureAssetTpl() {
+  if (assetTpl) return Promise.resolve(assetTpl);
+  if (!assetTplPromise) {
+    assetTplPromise = fetch('/api/rules')
+      .then(r => r.json())
+      .then(d => {
+        assetTpl = {};
+        const rule = (d.rules || []).find(x => x.name === 'asset_tpl');
+        if (rule && rule.content) parseAssetTpl(rule.content, assetTpl);
+        return assetTpl;
+      })
+      .catch(() => { assetTpl = {}; return assetTpl; });
+  }
+  return assetTplPromise;
+}
+
+function parseAssetTpl(content, out) {
+  let key = '', lines = [];
+  const flush = () => {
+    if (key) out[key] = lines.join('\n').replace(/\s*\n\s*/g, ' ').trim();
+    lines = [];
+  };
+  String(content || '').split('\n').forEach(line => {
+    const m = line.match(/^##\s*(.+)$/);
+    if (m) { flush(); key = m[1].trim(); } else lines.push(line);
+  });
+  flush();
+  out._frames = {};
+  out._cams = {};
+  (out['分镜-景别分配'] || '').split('\n').forEach(l => {
+    const m = l.match(/^(\d+)=([^|]+)\|(.*)$/);
+    if (m) out._frames[m[1]] = [m[2].trim(), m[3].trim()];
+  });
+  (out['分镜-默认机位'] || '').split('\n').forEach(l => {
+    const m = l.match(/^(\d+)=(.*)$/);
+    if (m) out._cams[m[1]] = m[2].trim();
+  });
+}
+
+function tplFill(tpl, map) {
+  let s = String(tpl || '');
+  Object.keys(map || {}).forEach(k => { s = s.replace(new RegExp('\\{' + k + '\\}', 'g'), map[k]); });
+  return s;
+}
 
 async function checkBoogu() {
   const el = $('booguStatus');
   try {
     const r = await fetch('/api/boogu_check');
     const d = await r.json();
-    el.textContent = d.ok ? '✅ Boogu 生图服务在线（本地生成）' : `⚠️ Boogu 未启动（${d.error || ''}）`;
+    const modeSel = $('imgGenMode');
+    if (modeSel && d.provider) modeSel.value = d.provider;
+    el.textContent = d.ok
+      ? (d.provider === 'comfyui' ? '✅ Boogu 服务在线（当前生图模式：远程 ComfyUI H3）' : '✅ Boogu 生图服务在线（本地生成）')
+      : `⚠️ Boogu 未启动（${d.error || ''}）`;
   } catch (e) { el.textContent = '⚠️ 检测失败'; }
 }
 
+async function switchImgGenMode(provider) {
+  // 参考资产页生图模式切换：本地 Boogu / 远程 ComfyUI H3，立即生效
+  toastLoading('🔄 正在切换生图模式…');
+  try {
+    const r = await fetch('/api/image_gen_mode', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({provider}),
+    });
+    const d = await r.json();
+    if (!r.ok) { toast(d.error || '切换失败', true); checkBoogu(); return; }
+    checkBoogu();
+    toast(provider === 'comfyui' ? '✅ 已切换到远程 ComfyUI H3（分镜可用场景+角色多参考图锁定）' : '✅ 已切换到本地 Boogu（未审查编码器）');
+  } catch (e) { toast('切换失败：' + e.message, true); checkBoogu(); }
+}
+
 function renderAssets() {
+  // 模板规则未加载时先加载，再渲染（避免用代码兜底文本渲染一遍）
+  if (!assetTpl) { ensureAssetTpl().then(() => renderAssets()); return; }
   renderAssetState();
   const roles = (currentScript && currentScript.role_list) || [];
   $('roleAssets').innerHTML = roles.map((r, i) => {
     const name = r.role_name || r.name || '角色' + (i + 1);
-    const img = assetImgs.role[name] || '';
     const views = ((assetImgs.roleViews && assetImgs.roleViews[name]) || {});
+    const pv = rolePreview[name] || 'front';
+    const img = views[pv] || views.front || assetImgs.role[name] || '';
     const viewMeta = {front: ['正面', '🖼️'], face: ['脸部', '👤'], side: ['侧面', '↔️'], back: ['背面', '⬅️']};
     const viewGrid = ['front', 'face', 'side', 'back'].map(v => {
       const f = (v === 'front' ? (views.front || img) : views[v]) || '';
       return `<div style="flex:1;min-width:0;text-align:center">
         <div style="width:100%;aspect-ratio:3/4;border-radius:6px;overflow:hidden;border:1px solid var(--line);background:#f1f4f9">
-          ${f ? `<img src="/media/${encodeURIComponent(f)}" style="width:100%;height:100%;object-fit:cover">` : ''}
+          ${f ? `<img class="role-view-thumb" data-name="${esc(name)}" data-view="${v}" src="/media/${encodeURIComponent(f)}" onclick="previewRoleView('${esc(name)}','${v}')" style="width:100%;height:100%;object-fit:cover;cursor:pointer;border:2px solid ${pv === v ? 'var(--blue)' : 'transparent'}" title="点击预览到上方大图">` : ''}
         </div>
         <button class="btn rv-btn" data-i="${i}" data-view="${v}" onclick="genRoleView(${i},'${v}')"
           style="width:100%;font-size:11px;padding:3px 2px;margin-top:3px">${viewMeta[v][1]} ${f ? '重生成' : viewMeta[v][0]}</button>
@@ -2283,13 +2738,21 @@ function renderAssets() {
     const genderOpts = ['女', '男', '未知'].map(g =>
       `<option value="${g}" ${gSel === g ? 'selected' : ''}>${g}</option>`).join('');
     const prompt = assetPrompts.role[name] || defaultRolePrompt(r, gSel);
+    const genRef = ((assetState.roles && assetState.roles[name]) || {}).gen_ref || '';
     return `<div class="card-item">
       <div class="r1"><span class="name">${esc(name)}</span>${verifyBadge('role', name)}
         <select class="g-sel" onchange="setRoleGender(${i}, this.value)" style="width:70px;font-size:12px;padding:4px">${genderOpts}</select>
       </div>
       <div class="meta">${esc(r.role_desc || '')}</div>
-      <img src="${img ? '/media/' + encodeURIComponent(img) : ''}" style="width:100%;aspect-ratio:3/4;object-fit:cover;border-radius:8px;border:1px solid var(--line);background:#f1f4f9;display:${img ? 'block':'none'}">
+      <img class="role-main-img" data-name="${esc(name)}" src="${img ? '/media/' + encodeURIComponent(img) : ''}" onclick="${img ? `zoomImg('/media/${encodeURIComponent(img)}')` : ''}" style="width:100%;aspect-ratio:3/4;object-fit:cover;border-radius:8px;border:1px solid var(--line);background:#f1f4f9;display:${img ? 'block':'none'}${img ? ';cursor:zoom-in' : ''}">
       <div style="display:flex;gap:4px;margin-top:6px">${viewGrid}</div>
+      <div style="display:flex;gap:4px;align-items:center;margin-top:6px">
+        <span style="font-size:11px;color:var(--muted);white-space:nowrap">参考图</span>
+        <input type="file" accept="image/*" style="display:none" id="roleRefUpload_${i}" onchange="uploadRef('role','${esc(name)}', this)">
+        <button class="btn" style="padding:2px 8px;font-size:11px" onclick="document.getElementById('roleRefUpload_${i}').click()">📤 上传</button>
+        ${genRef ? `<img src="/media/${encodeURIComponent(genRef)}" style="width:34px;height:45px;object-fit:cover;border-radius:4px;border:1px solid var(--line)">` : ''}
+        ${genRef ? `<button class="btn" style="padding:2px 8px;font-size:11px" onclick="clearRef('role','${esc(name)}')">✕ 清除</button>` : ''}
+      </div>
       <details style="margin-top:8px"><summary style="font-size:12px;color:var(--muted);cursor:pointer">📝 提示词（可编辑）</summary>
         <textarea class="asset-prompt" data-kind="role" data-key="${esc(name)}" rows="4" style="width:100%;font-size:11px;margin-top:6px">${esc(prompt)}</textarea>
       </details>
@@ -2306,9 +2769,17 @@ function renderAssets() {
   $('sceneAssets').innerHTML = sceneNames.map((sc, i) => {
     const img = assetImgs.scene[sc] || '';
     const prompt = assetPrompts.scene[sc] || defaultScenePrompt(sc);
+    const genRef = ((assetState.scenes && assetState.scenes[sc]) || {}).gen_ref || '';
     return `<div class="card-item">
       <div class="r1"><span class="name">${esc(sc)}</span>${verifyBadge('scene', sc)}</div>
-      <img src="${img ? '/media/' + encodeURIComponent(img) : ''}" style="width:100%;aspect-ratio:3/4;object-fit:cover;border-radius:8px;border:1px solid var(--line);background:#f1f4f9;display:${img ? 'block':'none'}">
+      <img src="${img ? '/media/' + encodeURIComponent(img) : ''}" onclick="${img ? `zoomImg('/media/${encodeURIComponent(img)}')` : ''}" style="width:100%;aspect-ratio:3/4;object-fit:cover;border-radius:8px;border:1px solid var(--line);background:#f1f4f9;display:${img ? 'block':'none'}${img ? ';cursor:zoom-in' : ''}">
+      <div style="display:flex;gap:4px;align-items:center;margin-top:6px">
+        <span style="font-size:11px;color:var(--muted);white-space:nowrap">参考图</span>
+        <input type="file" accept="image/*" style="display:none" id="sceneRefUpload_${i}" onchange="uploadRef('scene','${esc(sc)}', this)">
+        <button class="btn" style="padding:2px 8px;font-size:11px" onclick="document.getElementById('sceneRefUpload_${i}').click()">📤 上传</button>
+        ${genRef ? `<img src="/media/${encodeURIComponent(genRef)}" style="width:34px;height:45px;object-fit:cover;border-radius:4px;border:1px solid var(--line)">` : ''}
+        ${genRef ? `<button class="btn" style="padding:2px 8px;font-size:11px" onclick="clearRef('scene','${esc(sc)}')">✕ 清除</button>` : ''}
+      </div>
       <details style="margin-top:8px"><summary style="font-size:12px;color:var(--muted);cursor:pointer">📝 提示词（可编辑）</summary>
         <textarea class="asset-prompt" data-kind="scene" data-key="${esc(sc)}" rows="3" style="width:100%;font-size:11px;margin-top:6px">${esc(prompt)}</textarea>
       </details>
@@ -2326,30 +2797,48 @@ function renderAssets() {
       || (assetImgs.story[i] ? {1: assetImgs.story[i]} : {});
     const shotCount = Math.max(1, Object.keys(shotsObj).length,
       parseInt($('storyShotsCount') ? $('storyShotsCount').value : '3') || 1);
-    const shotImgs = [];
+    const shotBlocks = [];
     for (let sn = 1; sn <= shotCount; sn++) {
       const img = shotsObj[sn] || '';
-      shotImgs.push(`<div style="position:relative">
-        <img src="${img ? '/media/' + encodeURIComponent(img) : ''}" style="width:100%;aspect-ratio:3/4;object-fit:cover;border-radius:8px;border:1px solid var(--line);background:#f1f4f9;display:${img ? 'block':'none'}">
-        <span style="position:absolute;left:6px;top:6px;background:rgba(0,0,0,.55);color:#fff;font-size:11px;padding:2px 6px;border-radius:4px">拍 ${sn}</span>
+      const sp = storyShotPrompt(i, sn);
+      const ref = ((assetState.storyShots && assetState.storyShots[i] && assetState.storyShots[i][sn]) || {}).gen_ref || '';
+      const busy = !!storyGenBusy[`${i}:${sn}`];
+      shotBlocks.push(`<div style="border:1px solid var(--line);border-radius:8px;padding:8px">
+        <div style="display:flex;align-items:center;gap:8px">
+          <img src="${img ? '/media/' + encodeURIComponent(img) : ''}" onclick="${img ? `zoomImg('/media/${encodeURIComponent(img)}')` : ''}" style="width:64px;height:85px;object-fit:cover;border-radius:6px;border:1px solid var(--line);background:#f1f4f9;display:${img ? 'block':'none'}${img ? ';cursor:zoom-in' : ''}">
+          <span style="font-size:12px;font-weight:600">拍 ${sn}</span>
+          <button class="btn" style="padding:3px 8px;font-size:11px" onclick="genStoryImg(${i}, ${sn})" ${busy ? 'disabled' : ''}>${busy ? '生成中…' : (img ? '🔄 重新生成' : '🎬 生成')}</button>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;margin-top:6px;flex-wrap:wrap">
+          <span style="font-size:11px;color:var(--muted)">参考图</span>
+          <input type="file" accept="image/*" style="display:none" id="storyRefUpload_${i}_${sn}" onchange="uploadStoryRef(${i}, ${sn}, this)">
+          <button class="btn" style="padding:2px 8px;font-size:11px" onclick="document.getElementById('storyRefUpload_${i}_${sn}').click()">📤 上传</button>
+          ${ref ? `<img src="/media/${encodeURIComponent(ref)}" style="width:40px;height:53px;object-fit:cover;border-radius:4px;border:1px solid var(--line)">` : ''}
+          ${ref ? `<button class="btn" style="padding:2px 8px;font-size:11px" onclick="clearStoryRef(${i}, ${sn})">✕ 清除</button>` : ''}
+        </div>
+        <textarea class="shot-prompt" data-seg="${i}" data-shot="${sn}" rows="3" style="width:100%;font-size:11px;margin-top:6px">${esc(sp)}</textarea>
       </div>`);
     }
-    const prompt = assetPrompts.story[i] || defaultStoryPrompt(i, 1);
     return `<div class="card-item">
-      <div class="r1"><span class="name">分镜 ${i + 1} · ${esc(s.scene || '')}</span>${verifyBadge('story', i)}</div>
-      ${shotImgs.join('') || '<div class="empty" style="grid-column:1/-1;padding:18px">还没有分镜图</div>'}
-      <details style="margin-top:8px"><summary style="font-size:12px;color:var(--muted);cursor:pointer">📝 拍1 提示词（可编辑）</summary>
-        <textarea class="asset-prompt" data-kind="story" data-key="${i}" rows="4" style="width:100%;font-size:11px;margin-top:6px">${esc(prompt)}</textarea>
-      </details>
-      <div class="row" style="margin-top:8px;flex-wrap:wrap">
-        ${Array.from({length: shotCount}, (_, k) => {
-          const sn = k + 1;
-          return `<button class="btn" style="padding:3px 8px;font-size:11px" onclick="genStoryImg(${i}, ${sn})">${shotsObj[sn] ? '🔄' : '🎬'} 拍${sn}</button>`;
-        }).join('')}
-        <button class="btn" style="padding:3px 8px;font-size:11px" onclick="openPromptModal('story', ${i})">💬 改提示词</button>
+      <div class="r1"><span class="name">分镜 ${i + 1} · ${esc(s.scene || '')}</span>${verifyBadge('story', i)}
+        <button class="btn" style="padding:3px 8px;font-size:11px" onclick="openPromptModal('story', ${i})">💬 改拍1提示词</button>
       </div>
+      ${shotBlocks.join('') || '<div class="empty" style="grid-column:1/-1;padding:18px">还没有分镜图</div>'}
     </div>`;
   }).join('') || '<div class="empty" style="grid-column:1/-1">剧本还没有分镜</div>';
+}
+
+function setGenRef(kind, key, val) {
+  if (kind === 'role') {
+    assetState.roles = assetState.roles || {};
+    assetState.roles[key] = assetState.roles[key] || {};
+    assetState.roles[key].gen_ref = val;
+  } else if (kind === 'scene') {
+    assetState.scenes = assetState.scenes || {};
+    assetState.scenes[key] = assetState.scenes[key] || {};
+    assetState.scenes[key].gen_ref = val;
+  }
+  autoSaveProject(true);
 }
 
 function inferGender(desc) {
@@ -2384,7 +2873,9 @@ function renderAssetState() {
     if (!s.desc) {
       const shots = sbByScene[sc] || [];
       const actions = shots.slice(0, 2).map(x => x.action || '').filter(Boolean).join('；');
-      s.desc = actions ? `${sc}，${projectEraZh()}；${actions}` : `${sc}，${projectEraZh()}`;
+      const era = projectEraZh();
+      s.desc = actions ? (era ? `${sc}，${era}；${actions}` : `${sc}；${actions}`)
+                       : (era ? `${sc}，${era}` : sc);
     }
   });
   const roleRows = roles.map((r, i) => {
@@ -2461,16 +2952,17 @@ async function genAsset(kind, key, prompt, label, opts) {
     };
     if (opts.view) expected.view = opts.view;
   } else if (kind === 'scene') {
-    const st = (assetState.scenes && assetState.scenes[key]) || {};
-    expected = {desc: st.desc || prompt.slice(0, 140)};
+    expected = {};  // 质检以本次实际提示词为准（expected.prompt 下方统一附加）
   } else if (kind === 'story') {
     const idx = typeof key === 'number' ? key : parseInt(key, 10);
     const roles = ((currentScript.storyboard_list || [])[idx] || {}).roles || [];
     expected = {look: prompt.slice(0, 160), people_count: Math.max(roles.length, 1)};
   }
+  // 质检与本次实际提示词对应：质检模型直接对着提示词检查要求
+  expected.prompt = prompt;
   const r = await fetch('/api/asset_gen', {
     method: 'POST', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({prompt, filename: fn, kind, key, expected}),
+    body: JSON.stringify({prompt, filename: fn, kind, key, expected, refs: opts.refs || [], shot: opts.shot || null}),
   });
   const d = await r.json();
   if (!r.ok) throw new Error(d.error || '生图失败');
@@ -2486,89 +2978,296 @@ function defaultRolePrompt(r, gender) {
   const genderEn = {女: 'a young Chinese woman', 男: 'a young Chinese man', 未知: ''}[gender] || '';
   const name = r.role_name || r.name || '';
   const desc = r.role_desc || '';
+  const st = (assetState.roles && assetState.roles[name]) || {};
+  const look = [st.hair, st.costume].filter(Boolean).join('，');
   const gText = genderZh || '根据名字与描述判断性别';
   const gEn = genderEn || 'gender according to the description';
-  return `${gZhHead(gText)}，${projectEraZh()}${desc || '人物'}。${gEn}，半身肖像照，真实人物照片风格，自然光，简洁干净背景，面部清晰，双眼有神，胶片质感，写实摄影，单一人像，画面内无文字、无其他人物、无多余肢体`;
+  const lookText = look ? `，${look}` : '';
+  const eraPhrase = projectEraZh() ? `，${projectEraZh()}风格` : '';
+  const genRef = ((assetState.roles && assetState.roles[name]) || {}).gen_ref || '';
+  const t = (assetTpl || {})['角色-正面'];
+  const prompt = t
+    ? tplFill(t, {GENDER_ZH: gZhHead(gText), DESC: desc || '人物', LOOK: lookText, ERA: eraPhrase, GENDER_EN: gEn})
+    : `${gZhHead(gText)}，${desc || '人物'}${lookText}${eraPhrase}。${gEn}，半身肖像照，真实人物照片风格，自然光，简洁干净背景，面部清晰，双眼有神，胶片质感，写实摄影，单一人像，画面内无文字、无其他人物、无多余肢体`;
+  return attachRefLink(prompt, 'role', genRef);
 }
 function gZhHead(t) { return t; }
 
 function defaultScenePrompt(sc) {
+  // 场景提示词从剧本场景描述提取环境（时间+地点+陈设），不用"场景名+通用样板"偷懒：
+  // 这样场景参考图才符合剧本（夜/昏黄灯泡/蓝白格子被等），分镜图 refedit 才能继承正确场景
+  const env = sceneEnvFromDesc(sc);
+  const timeHint = sceneTimeHint(sc + ' ' + env);
   const era = projectEraZh();
+  const eraPhrase = era ? `，${era}风格` : '';
   const noModern = era.includes('乡村') ? '，无现代物品' : '';
-  return `${sc}，${era}环境，写实场景照片，电影感，自然光，胶片质感，画面内无人物、无文字${noModern}`;
+  const genRef = ((assetState.scenes && assetState.scenes[sc]) || {}).gen_ref || '';
+  const envVal = (env || sc) + eraPhrase + (timeHint ? `，${timeHint}` : '');
+  const t = (assetTpl || {})['场景'];
+  const prompt = t
+    ? tplFill(t, {ENV: envVal, NO_MODERN: noModern})
+    : `${envVal}，写实场景照片，电影感，自然光，胶片质感，画面内无人物、无文字${noModern}`;
+  return attachRefLink(prompt, 'scene', genRef);
+}
+
+function sceneEnvFromDesc(sc) {
+  // 从剧本场景描述里提取纯环境部分：时间+地点前缀（第一个句号/分号前）原样保留，
+  // 正文在第一个"人物指示词"（角色名/他/她/两人/学生等）处截断，再按标点切句、
+  // 丢弃仍含人物词的从句与截断产生的半句，得到 时间+地点+陈设 的环境句
+  const st = (assetState.scenes && assetState.scenes[sc]) || {};
+  const d = String(st.desc || '');
+  if (!d) return '';
+  const names = ((currentScript && currentScript.role_list) || []).map(r => r.role_name || r.name).filter(Boolean);
+  const personWords = [...names, '他', '她', '两人', '二人', '他们', '学生', '人群', '同学们'];
+  // 前缀 = 场景名/时间地点区域（可能出现角色名如"林川家"），不参与人物截断
+  const m = d.match(/^([^。；;]*)[。；;]([\s\S]*)$/);
+  const prefix = (m ? m[1] : d).trim();
+  const body = m ? m[2] : '';
+  let cut = body.length;
+  personWords.forEach(w => {
+    const i = body.indexOf(w);
+    if (i >= 0 && i < cut) cut = i;
+  });
+  const head = body.slice(0, cut);
+  let keep = head.split(/[，。；;！？、：]/).map(x => x.trim()).filter(Boolean)
+    .filter(c => !personWords.some(w => c.includes(w)));
+  // 截断处落在句中时，最后的半句不完整，丢弃（如"晚自习学生"→ 只留"昏黄灯泡下"）
+  if (head && !/[。；;！？]$/.test(head) && keep.length) keep = keep.slice(0, -1);
+  return [prefix, ...keep].filter(Boolean).join('；');
+}
+
+function sceneTimeHint(text) {
+  // 从剧本场景名/描述里的时段词给出画面光线基调（数据来自剧本，非写死风格）
+  const t = String(text || '');
+  if (/夜|晚|月光|灯/.test(t)) return '夜晚氛围：暗部为主、点光源照明、冷色调，禁止日光直射';
+  if (/清晨|黎明|拂晓/.test(t)) return '清晨氛围：薄雾、柔和晨光、冷青色调';
+  if (/黄昏|傍晚|日落/.test(t)) return '黄昏氛围：暖橙余晖、低角度光线';
+  if (/午后|白天|正午/.test(t)) return '日景氛围：自然日光';
+  return '';
 }
 
 function projectEraZh() {
-  // 从剧本类型/梗概/场景推断年代与场景基调，保证文字提示词与生图提示词一致
-  if (!currentScript) return '1980年代中国乡村';
-  const s = currentScript;
-  if (s.style) {
-    if (/1980|乡村|农村|校园|怀旧/.test(String(s.style))) return '1980年代中国乡村';
-    if (/城市|都市|现代|科幻|科技|工厂/.test(String(s.style))) return '现代中国城市';
-  }
-  const text = [s.type || '', s.logline || '', (s.storyboard_list || []).map(x => x.scene || '').join(' ')].join(' ');
-  return /城市|都市|信号站|高楼|霓虹|直升机|工厂|学校|现代|洪水/.test(text) ? '现代中国城市' : '1980年代中国乡村';
+  // 直接取第 2 步填写的「风格」；生成剧本前已强制必填，未填则一律不写年代
+  return $('styleInput') ? $('styleInput').value.trim() : '';
 }
 
 function defaultStoryPrompt(i, shotIdx) {
-  // 中文分镜提示词：按"拍"取单拍定格瞬间（不再把整段动作塞进一张图）
+  // 中文分镜提示词：每拍 = 一个独立镜头（景别/机位/动作瞬间/对白各不同），
+  // 整段动作、整段对白、整段运镜不能再灌进每一拍，否则三拍提示词几乎一样、画面全靠随机
   shotIdx = shotIdx || 1;
   const s = (currentScript.storyboard_list || [])[i] || {};
+  let segRoles = s.roles || [];
+  if (typeof segRoles === 'string') segRoles = [segRoles];
   const parts = [];
-  // 场景描述优先用资产状态表（与文字提示词同一来源，保证生图/出片一致）
-  const scDesc = (assetState.scenes && assetState.scenes[s.scene] && assetState.scenes[s.scene].desc) || s.scene || '';
-  if (scDesc) parts.push(`场景：${scDesc}`);
-  // 单拍定格：把动作按 ；切分，取第 shotIdx 句作为这一拍；没有就取整段
+  // 场景只写场景名，不整段灌剧本动作（旧版把两段动作合并进 desc，导致每拍提示词几乎一样）
+  if (s.scene) parts.push(`场景：${s.scene}`);
+  // 单拍定格：动作按 ；切分，取第 shotIdx 句；句数不足循环取，避免短动作导致多拍同文
   const clauses = String(s.action || '').split(/[；;。]/).map(x => x.trim()).filter(Boolean);
-  const beat = clauses[shotIdx - 1] || clauses[0] || s.action || '';
+  const beat = clauses.length ? clauses[(shotIdx - 1) % clauses.length] : (s.action || '');
   parts.push(`这一拍（定格瞬间）：${beat}`);
-  if (s.camera) parts.push(`机位：${s.camera}`);
-  if (s.dialogue) parts.push(`对白：${s.dialogue}`);
+  // 景别/构图：每拍自动分配（分镜镜头逻辑：拍1 全景交代环境 → 拍2 中景动作 → 拍3 近景情绪）
+  const t = assetTpl || {};
+  const frames = t._frames || {
+    1: ['全景', '交代场景全貌与两人位置关系，人物全身入画'],
+    2: ['中景', '腰部以上取景，突出两人动作互动与关系'],
+    3: ['近景/特写', '面部与手部细节，突出情绪与关键动作'],
+    4: ['中近景', '过肩或中近景构图，突出对话与反应'],
+    5: ['大特写', '关键细节特写（手、物件、表情局部）'],
+  };
+  const [frame, comp] = frames[shotIdx] || frames[((shotIdx - 1) % 5) + 1] || ['中景', '突出动作与情绪'];
+  parts.push(`景别：${frame}。构图：${comp}`);
+  // 机位：按剧本运镜拆分，一镜一段轮流给本拍；拆不出就按景别给默认机位
+  const camParts = String(s.camera || '').split(/[，,、；;。]|最后|再/).map(x => x.trim()).filter(Boolean);
+  if (camParts.length) {
+    parts.push(`机位：${camParts[(shotIdx - 1) % camParts.length]}`);
+  } else {
+    const cams = t._cams || {1: '固定机位', 2: '缓慢推近', 3: '特写浅景深'};
+    parts.push(`机位：${cams[shotIdx] || cams[((shotIdx - 1) % 3) + 1] || '固定机位'}`);
+  }
+  // 对白：按说话句轮流分配到各拍，避免每拍都灌整段对白
+  let dLine = '';
+  const dLines = (String(s.dialogue || '').match(/[^：:]{1,16}：[“「][^”」]{1,80}[”」]/g) || []);
+  if (dLines.length) {
+    dLine = dLines[(shotIdx - 1) % dLines.length];
+  } else {
+    const dSent = (String(s.dialogue || '').split(/[。！？]/).map(x => x.trim()).filter(Boolean));
+    if (dSent.length) dLine = dSent[(shotIdx - 1) % dSent.length];
+  }
+  if (dLine) parts.push(`对白：${dLine}`);
   if (s.emotion) parts.push(`情绪：${s.emotion}`);
   const p = parts.join('。') + '。';
-  // 角色形象约束：从剧本角色表 + 锚点图提示词提炼，防止形象漂移
-  const roles = (currentScript && currentScript.role_list) || [];
-  const roleDesc = roles.map(r => {
-    const n = r.role_name || r.name;
-    const ap = assetPrompts.role[n] || '';
-    const gender = (assetImgs.roleGender && assetImgs.roleGender[n]) || inferGender(r.role_desc || '');
-    const g = gender === '女' ? '年轻女性' : gender === '男' ? '年轻男性' : '';
-    // 从锚点提示词里提取服装描述（碎花裙/外套等）
-    const dress = (ap.match(/(身穿[^，。]*|穿[^，。]*)/) || [])[0] || '';
-    const hair = (ap.match(/(扎[^，。]*|双[^，。]*辫|马尾[^，。]*)/) || [])[0] || '';
-    const bits = [g, hair, dress].filter(Boolean).join('，');
-    return `${n}（${bits || r.role_desc || ''}）`;
+  // 角色形象约束：只列本拍出场角色，优先用资产状态表（身份/发型/服装），强调与角色参考图同一人
+  const allRoleNames = ((currentScript && currentScript.role_list) || []).map(r => r.role_name || r.name);
+  const roleNames = segRoles.length ? segRoles : allRoleNames;
+  const roleDesc = roleNames.map(n => {
+    const r = ((currentScript && currentScript.role_list) || []).find(x => (x.role_name || x.name) === n) || {};
+    const st = (assetState.roles && assetState.roles[n]) || {};
+    const look = [st.identity, st.hair, st.costume].filter(Boolean).join('，');
+    const bits = look || r.role_desc || '';
+    return `${n}（${bits || '按角色设定'}）`;
   }).join('；');
-  const roleLine = roleDesc ? `画面人物形象必须与角色设定一致：${roleDesc}。` : '';
-  return p + `电影感故事板分镜图，竖构图，${projectEraZh()}风格，写实。${roleLine}`
-    + `画面中严格只有剧本出现的 ${Math.max((currentScript.storyboard_list || [])[i] && ((currentScript.storyboard_list || [])[i].roles || []).length || 0, 1)} 个人，`
-    + `人物计数铁律：全画面必须恰好 ${Math.max((currentScript.storyboard_list || [])[i] && ((currentScript.storyboard_list || [])[i].roles || []).length || 0, 1)} 人，`
-    + `绝对禁止任何第三人出现，包括背景人物、画面边缘半身人、被遮挡的人、镜像/倒影人物；`
-    + `两人身体轮廓清晰可分离，不得交叠成额外肢体；没有多余的肢体/手臂/手从画面外伸入，`
-    + `每人四肢完整、各两只手、手指清晰不粘连，`
-    + `两人的头部与身体必须自然衔接（无错位/拼接感/头身朝向矛盾），颈部正常，姿态符合动作描述；`
-    + `画面定格在这一瞬间，动作姿态有张力、符合人体力学，光影氛围符合"${beat.slice(0, 20)}"；`
-    + `构图策略：双人同框中近景，两人占据画面主体（约七成以上面积），机位贴近两人；`
-    + `背景为干净虚化的墙面或床帘暗角，禁止出现门口、窗户、镜子、走廊、反光面或任何能容纳第三人的背景空间；`
-    + `服装道具正常无穿帮，无文字乱码，无重复人物，无塑料包装盒，无饮料瓶`
-    + (projectEraZh().includes('乡村') ? '，无现代物品' : '')
-    + `；背景元素必须与上面「场景」描述一致（门窗/设备/位置不得凭空增加或替换）`;
+  const roleLine = roleDesc
+    ? tplFill(t['分镜-角色一致行'] || '画面人物形象必须与角色设定及角色参考图完全一致（同一张脸、同一发型、同一服装、同一体态，不得漂移）：{ROLES}。', {ROLES: roleDesc})
+    : '';
+  // Jaxx 风格 STRICT 身份锁定：每个角色一行唯一特征（参考图清单 + STRICT 是参考资产页的标准写法）
+  const strictLine = roleNames.map(n => {
+    const r = ((currentScript && currentScript.role_list) || []).find(x => (x.role_name || x.name) === n) || {};
+    const st = (assetState.roles && assetState.roles[n]) || {};
+    const look = [st.identity, st.hair, st.costume].filter(Boolean).join('，') || r.role_desc || '';
+    return `${n} = ONLY ${look || '按角色设定'}`;
+  }).join('；');
+  const strictBlock = strictLine
+    ? tplFill(t['分镜-STRICT 行'] || 'STRICT 身份锁定：{STRICT_ROLES}（全片唯一，不得与任何其他角色混淆，不得漂移）。', {STRICT_ROLES: strictLine})
+    : '';
+  const eraStyle = projectEraZh() ? `${projectEraZh()}风格，` : '';
+  const styleHead = tplFill(t['分镜-风格头'] || '电影感故事板分镜图，竖构图，{ERASTYLE}写实。', {ERASTYLE: eraStyle});
+  const n = Math.max(segRoles.length, 1);
+  const negBlock = tplFill(t['分镜-负面约束']
+    || `画面中严格只有剧本出现的 {N} 个人，人物计数铁律：全画面必须恰好 {N} 人，`
+      + '绝对禁止任何第三人出现，包括背景人物、画面边缘半身人、被遮挡的人、镜像/倒影人物；'
+      + '身体轮廓清晰可分离，不得交叠成额外肢体；没有多余的肢体/手臂/手从画面外伸入，'
+      + '每人四肢完整、各两只手、手指清晰不粘连；头部与身体自然衔接（无错位/拼接感/头身朝向矛盾），'
+      + '颈部正常，姿态符合动作描述；画面定格在这一瞬间，动作姿态有张力、符合人体力学，'
+      + `光影氛围符合"{BEAT}"；构图策略：按上面「景别/构图」执行，在场角色占据画面主体`
+      + '（约七成以上面积），机位贴近主体；背景为干净虚化的墙面或床帘暗角，禁止出现门口、'
+      + '窗户、镜子、走廊、反光面或任何能容纳第三人的背景空间；服装道具正常无穿帮，'
+      + '无文字乱码，无重复人物，无塑料包装盒，无饮料瓶{NO_MODERN}；背景元素必须与「场景」'
+      + '描述一致（门窗/设备/位置不得凭空增加或替换）',
+    {N: n, BEAT: beat.slice(0, 20), NO_MODERN: projectEraZh().includes('乡村') ? '，无现代物品' : ''});
+  return p + styleHead + roleLine + strictBlock + negBlock;
+}
+
+function storyShotPrompt(i, sn) {
+  // 每拍独立提示词：优先已保存的（storyShots[i][sn]），拍1 兼容旧 story[i]
+  const ss = (assetPrompts.storyShots && assetPrompts.storyShots[i]) || {};
+  if (ss[sn]) return ss[sn];
+  if (sn === 1 && assetPrompts.story[i]) return assetPrompts.story[i];
+  return defaultStoryPrompt(i, sn);
+}
+
+function h3PromptOf(i) {
+  // 第 4 步生成的 H3 规范提示词（作为分镜图提示词的内容来源）
+  return ((promptTasks && promptTasks[i] && String(promptTasks[i].prompt || '').trim())) || '';
+}
+
+async function fillStoryShotPrompt(i, sn) {
+  // 按最新规则填充分镜图提示词：
+  // 拍1：勾选 AI 且有第 4 步 H3 规范提示词时，用 AI 转单帧分镜图提示词（失败回退模板）；
+  // 拍2+：用 asset_tpl 景别模板（近景/特写等，与拍1 区分）
+  const ta = document.querySelector(`.shot-prompt[data-seg="${i}"][data-shot="${sn}"]`);
+  const saved = (assetPrompts.storyShots && assetPrompts.storyShots[i] && assetPrompts.storyShots[i][sn])
+    || (sn === 1 ? assetPrompts.story[i] : '');
+  if (ta && String(ta.value || '').trim()) return ta.value.trim();
+  if (saved) return saved;
+  const h3 = h3PromptOf(i);
+  if (sn === 1 && $('storyAiPrompt') && $('storyAiPrompt').checked && h3) {
+    const sb = (currentScript.storyboard_list || [])[i] || {};
+    const roles = ((currentScript.role_list || [])).map(r => ({
+      name: r.role_name || r.name,
+      desc: r.role_desc || '',
+      anchor_prompt: assetPrompts.role[r.role_name || r.name] || '',
+    }));
+    try {
+      const r = await fetch('/api/story_prompt', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({storyboard: sb, roles, h3_prompt: h3, lmstudio_token: $('lmToken').value.trim()}),
+      });
+      const d = await r.json();
+      if (r.ok && d.prompt && String(d.prompt).trim()) return String(d.prompt).trim();
+    } catch (e) { /* AI 失败回退规则模板 */ }
+  }
+  return defaultStoryPrompt(i, sn);
+}
+
+async function uploadStoryRef(i, sn, input) {
+  const file = input && input.files && input.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = async () => {
+    const b64 = reader.result.split(',')[1];
+    toastLoading('📤 上传参考图…');
+    try {
+      const r = await fetch('/api/upload_ref_image', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({filename: file.name, data_b64: b64}),
+      });
+      const d = await r.json();
+      if (!r.ok) { toast(d.error || '上传失败', true); return; }
+      assetState.storyShots = assetState.storyShots || {};
+      assetState.storyShots[i] = assetState.storyShots[i] || {};
+      assetState.storyShots[i][sn] = assetState.storyShots[i][sn] || {};
+      assetState.storyShots[i][sn].gen_ref = d.filename;
+      renderAssets();
+      autoSaveProject(true);
+      toast(`✅ 拍${sn} 参考图已设置：refedit 模式作 <Picture 1> 底图，出场角色锚点自动叠加为 <Picture 2+>（身份锁定）`);
+    } catch (e) { toast('上传失败：' + e.message, true); }
+  };
+  reader.readAsDataURL(file);
+}
+
+function clearStoryRef(i, sn) {
+  assetState.storyShots = assetState.storyShots || {};
+  if (assetState.storyShots[i]) delete assetState.storyShots[i][sn];
+  renderAssets();
+  autoSaveProject(true);
+}
+
+async function uploadRef(kind, key, input) {
+  const file = input && input.files && input.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = async () => {
+    const b64 = reader.result.split(',')[1];
+    toastLoading('📤 上传参考图…');
+    try {
+      const r = await fetch('/api/upload_ref_image', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({filename: file.name, data_b64: b64}),
+      });
+      const d = await r.json();
+      if (!r.ok) { toast(d.error || '上传失败', true); return; }
+      if (kind === 'role') {
+        assetState.roles = assetState.roles || {};
+        assetState.roles[key] = assetState.roles[key] || {};
+        assetState.roles[key].gen_ref = d.filename;
+      } else if (kind === 'scene') {
+        assetState.scenes = assetState.scenes || {};
+        assetState.scenes[key] = assetState.scenes[key] || {};
+        assetState.scenes[key].gen_ref = d.filename;
+      }
+      renderAssets();
+      autoSaveProject(true);
+      toast(`✅ ${kind === 'role' ? '角色' : '场景'}参考图已设置：refedit 模式作 <Picture 1>`);
+    } catch (e) { toast('上传失败：' + e.message, true); }
+  };
+  reader.readAsDataURL(file);
+}
+
+function clearRef(kind, key) {
+  if (kind === 'role' && assetState.roles && assetState.roles[key]) delete assetState.roles[key].gen_ref;
+  if (kind === 'scene' && assetState.scenes && assetState.scenes[key]) delete assetState.scenes[key].gen_ref;
+  renderAssets();
+  autoSaveProject(true);
 }
 
 async function genRoleImg(i) {
+  await Promise.all([ensureRefLinkTpl(), ensureAssetTpl()]);
   const r = (currentScript.role_list || [])[i];
   if (!r) return;
   const name = r.role_name || r.name;
   const ta = document.querySelector(`.asset-prompt[data-kind="role"][data-key="${CSS.escape(name)}"]`);
-  const prompt = (ta && ta.value.trim()) || defaultRolePrompt(r, assetImgs.roleGender && assetImgs.roleGender[name]);
+  let prompt = (ta && ta.value.trim()) || defaultRolePrompt(r, assetImgs.roleGender && assetImgs.roleGender[name]);
+  const ref = ((assetState.roles && assetState.roles[name]) || {}).gen_ref || '';
+  prompt = attachRefLink(prompt, 'role', ref);
   assetPrompts.role[name] = prompt;
   const btn = event.target; btn.disabled = true; btn.textContent = '生成中…';
   toastLoading(`🖼️ 正在生成「${name}」锚点图（约 10-30 秒）…`);
   try {
-    assetImgs.role[name] = await genAsset('role', name, prompt, '锚点');
+    assetImgs.role[name] = await genAsset('role', name, prompt, '锚点', {refs: ref ? [ref] : []});
     assetImgs.roleViews = assetImgs.roleViews || {};
     assetImgs.roleViews[name] = assetImgs.roleViews[name] || {};
     assetImgs.roleViews[name].front = assetImgs.role[name];
+    rolePreview[name] = 'front';
     assetState.roles[name] = assetState.roles[name] || {};
     assetState.roles[name].reference = assetImgs.role[name];
     assetState.roles[name].views = assetState.roles[name].views || {};
@@ -2584,33 +3283,47 @@ function roleViewPrompt(r, gender, view) {
   const name = r.role_name || r.name;
   const st = (assetState.roles && assetState.roles[name]) || {};
   const gText = {女: '年轻女性', 男: '年轻男性', 未知: ''}[gender] || '';
-  const same = `同一人物「${name}」，身份${st.identity || '与正面锚点图相同'}、发型${st.hair || '一致'}、服装${st.costume || '一致'}，与正面锚点图完全同一人，不得改变五官、发型与服装`;
-  const neg = `单一人像，无其他人物，无多余肢体/手指，无重复人物，无文字乱码，${projectEraZh()}风格，胶片质感，写实摄影`;
-  if (view === 'face') {
-    return `${gText}，${projectEraZh()}${r.role_desc || '人物'}。脸部特写肖像，面部占满画面，五官清晰，双眼有神，${same}。${neg}`;
-  }
-  if (view === 'side') {
-    return `${gText}，${projectEraZh()}${r.role_desc || '人物'}。全身侧面照，90度正侧面视角，站立姿态自然，${same}。${neg}`;
-  }
-  if (view === 'back') {
-    return `${gText}，${projectEraZh()}${r.role_desc || '人物'}。全身背面照，人物背对镜头，完整展现背影、背面发型与服装，${same}。${neg}`;
-  }
+  const eraPhrase = projectEraZh() ? `，${projectEraZh()}风格` : '';
+  // 身份基线：取已编辑锚点提示词的完整中文描述（去掉英文段与"半身肖像照"等
+  // 视图冲突样板），用户加的身材/外貌描述（如胸部丰满）会带到所有视图
+  const ap = assetPrompts.role[name] || '';
+  let identity = ap;
+  const enIdx = ap.search(/[A-Za-z]{3,}/);
+  if (enIdx > 0) identity = ap.slice(0, enIdx);
+  identity = identity.replace(/半身肖像照/g, '').replace(/真实人物照片风格/g, '').replace(/简洁干净背景/g, '').trim();
+  if (!identity) identity = `${gText}，${r.role_desc || '人物'}${eraPhrase}`;
+  const same = `同一人物「${name}」，身份${st.identity || '与锚点提示词相同'}、发型${st.hair || '一致'}、服装${st.costume || '一致'}，与锚点提示词完全一致，不得改变五官、发型与服装`;
+  const neg = `单一人像，无其他人物，无多余肢体/手指，无重复人物，无文字乱码${eraPhrase}，胶片质感，写实摄影`;
+  const vt = {face: '角色-脸部', side: '角色-侧面', back: '角色-背面'}[view];
+  const t = (assetTpl || {})[vt];
+  if (vt && t) return tplFill(t, {IDENTITY: identity, SAME: same, NEG: neg});
+  if (view === 'face') return `${identity}。脸部特写肖像，面部占满画面，五官清晰，双眼有神，${same}。${neg}`;
+  if (view === 'side') return `${identity}。全身侧面照，90度正侧面视角，站立姿态自然，${same}。${neg}`;
+  if (view === 'back') return `${identity}。全身背面照，人物背对镜头，完整展现背影、背面发型与服装，${same}。${neg}`;
   return defaultRolePrompt(r, gender);
 }
 
 async function genRoleView(i, view) {
+  await Promise.all([ensureRefLinkTpl(), ensureAssetTpl()]);
   const r = (currentScript.role_list || [])[i];
   if (!r) return;
   const name = r.role_name || r.name;
   const gender = (assetImgs.roleGender && assetImgs.roleGender[name]) || inferGender(r.role_desc || '');
-  const prompt = roleViewPrompt(r, gender, view);
+  let prompt = roleViewPrompt(r, gender, view);
+  // 参考图：优先手动上传的 gen_ref；没有则自动用正面锚点图，保证四视图是同一人
+  let ref = ((assetState.roles && assetState.roles[name]) || {}).gen_ref || '';
+  if (!ref) {
+    const views = (assetImgs.roleViews && assetImgs.roleViews[name]) || {};
+    ref = views.front || assetImgs.role[name] || '';
+  }
+  prompt = attachRefLink(prompt, 'role', ref);
   assetPrompts.role[name] = assetPrompts.role[name] || defaultRolePrompt(r, gender);
   const btn = document.querySelector(`.rv-btn[data-i="${i}"][data-view="${view}"]`);
   if (btn) { btn.disabled = true; btn.textContent = '生成中…'; }
   const vLabel = {front: '正面', face: '脸部', side: '侧面', back: '背面'}[view];
   toastLoading(`🖼️ 正在生成「${name}」${vLabel}图（约 10-30 秒）…`);
   try {
-    const fn = await genAsset('role', `${name}_${view}`, prompt, '锚点', {view});
+    const fn = await genAsset('role', `${name}_${view}`, prompt, '锚点', {view, refs: ref ? [ref] : []});
     assetImgs.roleViews = assetImgs.roleViews || {};
     assetImgs.roleViews[name] = assetImgs.roleViews[name] || {};
     assetImgs.roleViews[name][view] = fn;
@@ -2621,6 +3334,7 @@ async function genRoleView(i, view) {
       assetImgs.role[name] = fn;
       assetState.roles[name].reference = fn;
     }
+    rolePreview[name] = view;
     renderAssets();
     autoSaveProject(true);
     toast(`✅ 「${name}」${vLabel}图已生成`);
@@ -2644,15 +3358,18 @@ async function genRoleFourViews(i) {
 }
 
 async function genSceneImg(i) {
+  await Promise.all([ensureRefLinkTpl(), ensureAssetTpl()]);
   const sc = sceneNames[i];
   if (!sc) return;
   const ta = document.querySelector(`.asset-prompt[data-kind="scene"][data-key="${CSS.escape(sc)}"]`);
-  const prompt = (ta && ta.value.trim()) || defaultScenePrompt(sc);
+  let prompt = (ta && ta.value.trim()) || defaultScenePrompt(sc);
+  const ref = ((assetState.scenes && assetState.scenes[sc]) || {}).gen_ref || '';
+  prompt = attachRefLink(prompt, 'scene', ref);
   assetPrompts.scene[sc] = prompt;
   const btn = event.target; btn.disabled = true; btn.textContent = '生成中…';
   toastLoading(`🖼️ 正在生成场景图「${sc}」（约 10-30 秒）…`);
   try {
-    assetImgs.scene[sc] = await genAsset('scene', sc, prompt, '场景');
+    assetImgs.scene[sc] = await genAsset('scene', sc, prompt, '场景', {refs: ref ? [ref] : []});
     assetState.scenes[sc] = assetState.scenes[sc] || {};
     assetState.scenes[sc].reference = assetImgs.scene[sc];
     renderAssets();
@@ -2663,37 +3380,55 @@ async function genSceneImg(i) {
 }
 
 async function genStoryImg(i, shotIdx) {
+  await Promise.all([ensureRefLinkTpl(), ensureAssetTpl()]);
   shotIdx = shotIdx || 1;
-  const ta = document.querySelector(`.asset-prompt[data-kind="story"][data-key="${i}"]`);
-  let prompt = shotIdx === 1
-    ? ((ta && ta.value.trim()) || assetPrompts.story[i] || defaultStoryPrompt(i, 1))
-    : defaultStoryPrompt(i, shotIdx);
-  // 拍1：AI 按剧情生成规范提示词（用户手动编辑过的不覆盖）
-  if (shotIdx === 1 && $('storyAiPrompt').checked && !(ta && ta.value.trim())) {
-    toastLoading(`🤖 AI 正在按剧情生成分镜 ${i + 1} 提示词（约 20-40 秒）…`);
-    try {
+  const busyKey = `${i}:${shotIdx}`;
+  if (storyGenBusy[busyKey]) { toast('该拍正在生成中，请稍候', true); return; }
+  storyGenBusy[busyKey] = true;
+  let prompt = '';
+  try {
+    const ta = document.querySelector(`.shot-prompt[data-seg="${i}"][data-shot="${shotIdx}"]`);
+    const saved = (assetPrompts.storyShots && assetPrompts.storyShots[i] && assetPrompts.storyShots[i][shotIdx])
+      || (shotIdx === 1 ? assetPrompts.story[i] : '');
+    prompt = (ta && ta.value.trim()) || saved || defaultStoryPrompt(i, shotIdx);
+    // 拍1：AI 按剧情生成规范提示词（仅当没有手动内容和已保存提示词；AI 慢/失败自动回退规则模板）
+    if (shotIdx === 1 && $('storyAiPrompt').checked && !(ta && ta.value.trim()) && !saved) {
+      toastLoading(`🤖 AI 正在按剧情生成分镜 ${i + 1} 提示词（约 20-40 秒）…`);
       const sb = (currentScript.storyboard_list || [])[i] || {};
       const roles = ((currentScript.role_list || [])).map(r => ({
         name: r.role_name || r.name,
         desc: r.role_desc || '',
         anchor_prompt: assetPrompts.role[r.role_name || r.name] || '',
       }));
-      const r = await fetch('/api/story_prompt', {
-        method: 'POST', headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({storyboard: sb, roles, lmstudio_token: $('lmToken').value.trim()}),
-      });
-      const d = await r.json();
-      if (r.ok && d.prompt) {
-        prompt = d.prompt;
-        setAssetPrompt('story', i, prompt);
-      }
-    } catch (e) { /* AI 失败回退规则模板 */ }
+      try {
+        const r = await fetch('/api/story_prompt', {
+          method: 'POST', headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({storyboard: sb, roles, h3_prompt: h3PromptOf(i), lmstudio_token: $('lmToken').value.trim()}),
+        });
+        const d = await r.json();
+        if (r.ok && d.prompt) {
+          prompt = d.prompt;
+          setAssetPrompt('story', i, prompt);
+        }
+      } catch (e) { /* AI 失败回退规则模板 */ }
+    }
+    if (shotIdx === 1) assetPrompts.story[i] = prompt;
+  } catch (e) {
+    toast('分镜提示词生成失败：' + (e && e.message ? e.message : e), true);
+    delete storyGenBusy[busyKey];
+    return;
   }
-  if (shotIdx === 1) assetPrompts.story[i] = prompt;
-  const btn = event.target; btn.disabled = true; btn.textContent = '生成中…';
-  toastLoading(`🎬 正在生成分镜 ${i + 1} 拍${shotIdx}（约 10-30 秒）…`);
+  const btn = (typeof event !== 'undefined' && event && event.target) || null;
+  if (btn) { btn.disabled = true; btn.textContent = '生成中…'; }
+  toastLoading(`🎬 正在生成分镜 ${i + 1} 拍${shotIdx}（约 1 分钟）…`);
   try {
-    const fn = await genAsset('story', `s${i + 1}`, prompt, '分镜');
+    const ref = ((assetState.storyShots && assetState.storyShots[i] && assetState.storyShots[i][shotIdx]) || {}).gen_ref || '';
+    // 提示词里结构化写清参考图模式/标签/用途/继承规则，并同步回提示词框与保存
+    prompt = attachStoryRefBlock(prompt, i, ref);
+    if (shotIdx === 1) assetPrompts.story[i] = prompt;
+    const ta2 = document.querySelector(`.shot-prompt[data-seg="${i}"][data-shot="${shotIdx}"]`);
+    if (ta2) ta2.value = prompt;
+    const fn = await genAsset('story', i, prompt, '分镜', {shot: shotIdx, refs: ref ? [ref] : []});
     assetImgs.storyShots = assetImgs.storyShots || {};
     assetImgs.storyShots[i] = assetImgs.storyShots[i] || {};
     assetImgs.storyShots[i][shotIdx] = fn;
@@ -2702,7 +3437,11 @@ async function genStoryImg(i, shotIdx) {
     autoSaveProject(true);
     toast(`✅ 分镜 ${i + 1} 拍${shotIdx} 已生成`);
   } catch (e) { toast(e.message, true); }
-  finally { if (btn) { btn.disabled = false; btn.textContent = `🔄 拍${shotIdx}`; } }
+  finally {
+    delete storyGenBusy[busyKey];
+    if (btn) { btn.disabled = false; btn.textContent = `🔄 拍${shotIdx}`; }
+    renderAssets();
+  }
 }
 
 function setRoleGender(i, g) {
@@ -2728,7 +3467,8 @@ function assetPromptOf(kind, key) {
       return assetPrompts.role[key] || defaultRolePrompt(r, (assetImgs.roleGender && assetImgs.roleGender[key]) || inferGender(r && r.role_desc || ''));
     },
     scene: () => assetPrompts.scene[key] || defaultScenePrompt(key),
-    story: () => assetPrompts.story[key] || defaultStoryPrompt(key),
+    story: () => (assetPrompts.storyShots && assetPrompts.storyShots[key] && assetPrompts.storyShots[key][1])
+      || assetPrompts.story[key] || defaultStoryPrompt(key, 1),
   };
   return (map[kind] || (() => ''))();
 }
@@ -2757,9 +3497,19 @@ function openPromptModal(kind, idx) {
 }
 
 function setAssetPrompt(kind, key, prompt) {
+  if (kind === 'story') {
+    assetPrompts.storyShots = assetPrompts.storyShots || {};
+    assetPrompts.storyShots[key] = assetPrompts.storyShots[key] || {};
+    assetPrompts.storyShots[key][1] = prompt;
+  }
   assetPrompts[kind][key] = prompt;
-  const ta = document.querySelector(`.asset-prompt[data-kind="${kind}"][data-key="${CSS.escape(String(key))}"]`);
-  if (ta) ta.value = prompt;
+  if (kind === 'story') {
+    const ta = document.querySelector(`.shot-prompt[data-seg="${key}"][data-shot="1"]`);
+    if (ta) ta.value = prompt;
+  } else {
+    const ta = document.querySelector(`.asset-prompt[data-kind="${kind}"][data-key="${CSS.escape(String(key))}"]`);
+    if (ta) ta.value = prompt;
+  }
 }
 
 async function doPromptModify() {
@@ -2785,7 +3535,60 @@ async function doPromptModify() {
   } catch (e) { toast('修改失败：' + e.message, true); }
 }
 
+async function remakeAssets() {
+  // 重制：清空图片引用与提示词（文件保留）→ 按第 4 步规范提示词 + 最新规则重新填充 → 批量出图
+  if (!currentScript) { toast('请先生成剧本', true); return; }
+  const hasH3 = (promptTasks || []).some(t => String(t.prompt || '').trim());
+  const warn = hasH3
+    ? '♻️ 重制全部参考图？\n将清空现有图片引用与提示词（磁盘文件保留），按第 4 步规范提示词 + 最新规则重新填充角色/场景/分镜提示词，然后批量重新出图。\n分镜拍1 会用 AI 把 H3 规范提示词转成单帧分镜图提示词（每段约 20-40 秒），总耗时较长，完成前请勿关闭页面。'
+    : '♻️ 重制全部参考图？\n将清空现有图片引用与提示词（磁盘文件保留），按当前剧本 + 最新模板重新填充并批量出图（第 4 步还没有规范提示词，分镜拍1 不启用 AI 转单帧）。';
+  askConfirm(warn, async () => {
+    await cancelAssetsTask();
+    // 与「清空已生成图」一致：清图片引用 + 提示词 + 状态表引用（磁盘文件保留）
+    assetImgs = {role: {}, scene: {}, story: {}};
+    assetPrompts = {role: {}, scene: {}, story: {}};
+    assetMeta = {role: {}, scene: {}, story: {}};
+    Object.keys(assetState.roles || {}).forEach(n => {
+      delete assetState.roles[n].reference;
+      delete assetState.roles[n].views;
+    });
+    Object.keys(assetState.scenes || {}).forEach(n => {
+      delete assetState.scenes[n].reference;
+    });
+    rolePreview = {};
+    await Promise.all([ensureRefLinkTpl(), ensureAssetTpl()]);
+    renderAssets(); // 先重渲染：文本框清空，避免旧值被当作手动内容
+    // 预填充分镜提示词：拍1 AI 转 H3 规范提示词（勾选 AI 时），拍2+ 用景别模板
+    const sb = (currentScript.storyboard_list || []) || [];
+    const shots = Math.max(1, Math.min(5, parseInt($('storyShotsCount') ? $('storyShotsCount').value : '3') || 1));
+    const total = sb.length * shots;
+    let done = 0;
+    if (total) {
+      $('assetProgress').style.display = '';
+      $('assetBar').style.width = '0%';
+      $('assetProgressText').textContent = `正在按最新规则填充分镜提示词（0/${total}）…`;
+      for (let i = 0; i < sb.length; i++) {
+        assetPrompts.storyShots = assetPrompts.storyShots || {};
+        assetPrompts.storyShots[i] = assetPrompts.storyShots[i] || {};
+        for (let sn = 1; sn <= shots; sn++) {
+          const p = await fillStoryShotPrompt(i, sn);
+          assetPrompts.storyShots[i][sn] = p;
+          const ta = document.querySelector(`.shot-prompt[data-seg="${i}"][data-shot="${sn}"]`);
+          if (ta) ta.value = p;
+          done++;
+          $('assetProgressText').textContent = `正在填充分镜提示词（${done}/${total}）…`;
+          autoSaveProject(true);
+        }
+      }
+    }
+    renderAssets();
+    autoSaveProject(true);
+    genAllAssets(); // 图片引用已清空 → 批量生成全部
+  });
+}
+
 async function genAllAssets() {
+  await Promise.all([ensureRefLinkTpl(), ensureAssetTpl()]);
   if (!currentScript) { toast('请先生成剧本', true); return; }
   const roles = (currentScript.role_list || []);
   const sb = (currentScript.storyboard_list || []);
@@ -2793,7 +3596,8 @@ async function genAllAssets() {
   const viewZh = {front: '正面', face: '脸部', side: '侧面', back: '背面'};
   // 收集待生成清单（只生成缺失的，支持断点续跑），交给服务端后台批量生成
   const items = [];
-  const pushItem = (kind, key, prompt, view, expected, label, shot) => items.push({kind, key, shot, prompt, view, expected, label});
+  const pushItem = (kind, key, prompt, view, expected, label, shot, refs) => items.push({kind, key, shot, prompt, view, expected, label, refs});
+  let aiFill = 0;
   roles.forEach((r, i) => {
     const name = r.role_name || r.name;
     ['front', 'face', 'side', 'back'].forEach(v => {
@@ -2804,27 +3608,44 @@ async function genAllAssets() {
         : views[v];
       if (has) return;
       const gender = (assetImgs.roleGender && assetImgs.roleGender[name]) || inferGender(r.role_desc || '');
-      const prompt = roleViewPrompt(r, gender, v);
       const st = assetState.roles[name] || {};
+      const genRef = st.gen_ref || '';
+      // 上传了参考图时，提示词必须带【参考图解析】块（<Picture 1> + inherit/exclude，按 ref_link 规则）
+      const prompt = genRef ? attachRefLink(roleViewPrompt(r, gender, v), 'role', genRef)
+                            : roleViewPrompt(r, gender, v);
+      // 非正面视图自动用正面锚点图做身份参考（保证四视图同一人）
+      const frontRef = (assetImgs.roleViews && assetImgs.roleViews[name] && assetImgs.roleViews[name].front)
+        || assetImgs.role[name] || '';
+      const refs = genRef ? [genRef] : (v !== 'front' && frontRef ? [frontRef] : []);
       pushItem('role', name, prompt, v, {
         gender: gender || '未知', hair: st.hair || '', costume: st.costume || '',
-        look: [st.hair, st.costume].filter(Boolean).join('，') || prompt.slice(0, 120), view: v,
-      }, `角色「${name}」${viewZh[v]}`);
+        look: [st.hair, st.costume].filter(Boolean).join('，') || prompt.slice(0, 120), view: v, prompt,
+      }, `角色「${name}」${viewZh[v]}`, undefined, refs);
     });
   });
   sceneNames.forEach(sc => {
     if (assetImgs.scene[sc]) return;
     const prompt = defaultScenePrompt(sc);
-    pushItem('scene', sc, prompt, null, {desc: (assetState.scenes[sc] || {}).desc || prompt.slice(0, 140)}, `场景「${sc}」`);
+    const genRef = ((assetState.scenes && assetState.scenes[sc]) || {}).gen_ref || '';
+    pushItem('scene', sc, prompt, null, {prompt}, `场景「${sc}」`, undefined, genRef ? [genRef] : []);
   });
-  sb.forEach((s, i) => {
+  for (const s of sb) {
+    const i = sb.indexOf(s);
     const shots = Math.max(1, Math.min(5, parseInt($('storyShotsCount') ? $('storyShotsCount').value : '3') || 1));
     for (let sn = 1; sn <= shots; sn++) {
       if (assetImgs.storyShots && assetImgs.storyShots[i] && assetImgs.storyShots[i][sn]) continue;
-      const prompt = defaultStoryPrompt(i, sn);
-      pushItem('story', i, prompt, null, {look: prompt.slice(0, 160), people_count: Math.max((s.roles || []).length, 1)}, `分镜 ${i + 1} 拍${sn}`, sn);
+      if (sn === 1 && $('storyAiPrompt') && $('storyAiPrompt').checked && h3PromptOf(i)) {
+        aiFill++;
+        $('assetProgress').style.display = '';
+        $('assetProgressText').textContent = `🤖 正在按第 4 步规范提示词填充分镜提示词（第 ${aiFill} 段，每段约 20-40 秒）…`;
+      }
+      // 按最新规则填充：拍1 用第 4 步 H3 规范提示词 AI 转单帧（勾选 AI 时），其余用景别模板
+      let prompt = await fillStoryShotPrompt(i, sn);
+      const ref = ((assetState.storyShots && assetState.storyShots[i] && assetState.storyShots[i][sn]) || {}).gen_ref || '';
+      prompt = attachStoryRefBlock(prompt, i, ref);
+      pushItem('story', i, prompt, null, {look: prompt.slice(0, 160), people_count: Math.max((s.roles || []).length, 1), prompt}, `分镜 ${i + 1} 拍${sn}`, sn, ref ? [ref] : []);
     }
-  });
+  }
   const total = items.length;
   if (!total) { toast('没有可生成的资产', true); return; }
   startAssetsBatch(items);
@@ -2846,32 +3667,46 @@ async function startAssetsBatch(items) {
   } catch (e) { $('assetProgress').style.display = 'none'; toast('启动失败：' + e.message, true); }
 }
 
-function genStoryboards() {
+async function genStoryboards() {
   if (!currentScript) { toast('请先生成剧本', true); return; }
   const sb = currentScript.storyboard_list || [];
   const items = [];
   const shots = Math.max(1, Math.min(5, parseInt($('storyShotsCount') ? $('storyShotsCount').value : '3') || 1));
-  sb.forEach((s, i) => {
+  let aiFill = 0;
+  for (let i = 0; i < sb.length; i++) {
+    const s = sb[i];
     for (let sn = 1; sn <= shots; sn++) {
       if (assetImgs.storyShots && assetImgs.storyShots[i] && assetImgs.storyShots[i][sn]) continue;
-      const prompt = defaultStoryPrompt(i, sn);
+      // 按最新规则填充：拍1 有第 4 步规范提示词且勾选 AI 时，AI 转单帧；拍2+ 用景别模板
+      if (sn === 1 && $('storyAiPrompt') && $('storyAiPrompt').checked && h3PromptOf(i)) {
+        aiFill++;
+        $('assetProgress').style.display = '';
+        $('assetProgressText').textContent = `🤖 正在按第 4 步规范提示词填充分镜提示词（第 ${aiFill} 段，每段约 20-40 秒）…`;
+      }
+      const prompt = await fillStoryShotPrompt(i, sn);
+      const ref = ((assetState.storyShots && assetState.storyShots[i] && assetState.storyShots[i][sn]) || {}).gen_ref || '';
+      const p = attachStoryRefBlock(prompt, i, ref);
       items.push({
-        kind: 'story', key: i, shot: sn, prompt, view: null,
-        expected: {look: prompt.slice(0, 160), people_count: Math.max((s.roles || []).length, 1)},
-        label: `分镜 ${i + 1} 拍${sn}`,
+        kind: 'story', key: i, shot: sn, prompt: p, view: null,
+        expected: {look: p.slice(0, 160), people_count: Math.max((s.roles || []).length, 1), prompt: p},
+        label: `分镜 ${i + 1} 拍${sn}`, refs: ref ? [ref] : [],
       });
     }
-  });
+  }
   if (!items.length) { toast('分镜图已全部生成', true); return; }
   startAssetsBatch(items);
 }
 
 let assetsGenRunning = false;  // 服务端批量生图任务是否在跑（用于忙碌拦截/刷新恢复）
+let assetsPoll = null;          // 批量生图进度轮询句柄（清空图片时需停止）
 
 function pollAssetsTask(tid) {
   assetsGenRunning = true;
   $('assetProgress').style.display = '';
-  const poll = setInterval(async () => {
+  const stopBtn = $('btnStopAssets');
+  if (stopBtn) stopBtn.style.display = 'inline-block';
+  if (assetsPoll) clearInterval(assetsPoll);
+  assetsPoll = setInterval(async () => {
     try {
       const r = await fetch(`/api/assets_gen_progress?task_id=${encodeURIComponent(tid)}`);
       const d = await r.json();
@@ -2881,9 +3716,10 @@ function pollAssetsTask(tid) {
         const fails = (d.failed || []).map(f => f.label).join('、');
         $('assetProgressText').textContent = `已生成 ${done}/${total} 张 · ${d.current || ''}${fails ? ` · 失败：${fails}` : ''}`;
       } else {
-        clearInterval(poll);
+        clearInterval(assetsPoll); assetsPoll = null;
         assetsGenRunning = false;
         $('assetProgress').style.display = 'none';
+        if (stopBtn) stopBtn.style.display = 'none';
         if (d.status === 'done') {
           await loadProject();  // 同步服务端已生成的资产
           renderAssets();
@@ -2897,12 +3733,29 @@ function pollAssetsTask(tid) {
         }
       }
     } catch (e) {
-      clearInterval(poll);
+      clearInterval(assetsPoll); assetsPoll = null;
       assetsGenRunning = false;
       $('assetProgress').style.display = 'none';
+      if (stopBtn) stopBtn.style.display = 'none';
       toast('进度查询失败：' + e.message, true);
     }
   }, 3000);
+}
+
+function stopAssetsNow() {
+  cancelAssetsTask();
+  toast('⏹ 已停止批量生图，可重新生成或清空');
+  renderAssets();
+}
+
+async function cancelAssetsTask() {
+  // 清空参考图时：停止本地轮询 + 通知后端取消批量任务，避免"删了还在生成"
+  if (assetsPoll) { clearInterval(assetsPoll); assetsPoll = null; }
+  assetsGenRunning = false;
+  $('assetProgress').style.display = 'none';
+  const stopBtn = $('btnStopAssets');
+  if (stopBtn) stopBtn.style.display = 'none';
+  try { await fetch('/api/assets_gen_cancel', {method: 'POST'}); } catch (e) {}
 }
 
 async function resumeAssets() {
@@ -2921,7 +3774,9 @@ async function resumeAssets() {
 
 function clearAssets() {
   askConfirm('确定清空已生成的参考图吗？\n将移除 角色/场景/分镜 的已生成图片引用（文件本身不删），'
-    + '你填写的身份/发型/服装/场景描述保留。清空后点「一键生成」会用最新提示词重新生成。', async () => {
+    + '并重置对应提示词为当前剧本的最新默认（你手动改过的提示词也会重置，身份/发型/服装/场景描述保留）。'
+    + '清空后点「一键生成」会用最新提示词重新生成。', async () => {
+    await cancelAssetsTask();
     // 清图片引用：assetImgs / 状态表 reference+views / 质检记录
     assetImgs = {role: {}, scene: {}, story: {}};
     Object.keys(assetState.roles || {}).forEach(n => {
@@ -2932,8 +3787,10 @@ function clearAssets() {
       delete assetState.scenes[n].reference;
     });
     assetMeta = {role: {}, scene: {}, story: {}};
-    // 分镜提示词也清空：让分镜图用最新模板/规则重新生成（角色/场景提示词保留自定义）
-    assetPrompts = {role: assetPrompts.role || {}, scene: assetPrompts.scene || {}, story: {}};
+    // 提示词全部重置：让角色/场景/分镜都用「当前剧本 + 最新模板」重新组装，
+    // 避免清图后仍用旧剧本时代生成的老提示词
+    assetPrompts = {role: {}, scene: {}, story: {}};
+    rolePreview = {};
     renderAssets();
     autoSaveProject(true);
     toast('🧹 已清空，点「⚡ 一键生成全部参考图」用新提示词重新生成');
@@ -2943,20 +3800,24 @@ function clearAssets() {
 function clearAssetsByKind(kind) {
   const labels = {role: '角色图', scene: '场景图', story: '分镜图'};
   const tips = {
-    role: '角色图（含四视图）',
-    scene: '场景图',
+    role: '角色图（含四视图）与角色提示词',
+    scene: '场景图与场景提示词',
     story: '分镜图（分镜提示词一并清空，用最新模板重生成）',
   };
-  askConfirm(`确定清空已生成的${tips[kind]}吗？\n磁盘文件不删，身份/服装/场景描述保留。`, async () => {
+  askConfirm(`确定清空已生成的${tips[kind]}吗？\n磁盘文件不删，身份/服装/场景描述保留；`
+    + `${kind === 'story' ? '分镜' : kind === 'role' ? '角色' : '场景'}提示词将重置为当前剧本的最新默认。`, async () => {
+    await cancelAssetsTask();
     if (kind === 'role') {
       assetImgs.role = {};
       assetImgs.roleViews = {};
+      assetPrompts.role = {};
       Object.keys(assetState.roles || {}).forEach(n => {
         delete assetState.roles[n].reference;
         delete assetState.roles[n].views;
       });
     } else if (kind === 'scene') {
       assetImgs.scene = {};
+      assetPrompts.scene = {};
       Object.keys(assetState.scenes || {}).forEach(n => {
         delete assetState.scenes[n].reference;
       });
@@ -2964,6 +3825,7 @@ function clearAssetsByKind(kind) {
       assetImgs.story = {};
       assetImgs.storyShots = {};
       assetPrompts.story = {};
+      assetPrompts.storyShots = {};
     }
     assetMeta[kind] = {};
     renderAssets();
@@ -2980,7 +3842,11 @@ async function genRoleViewAsset(i, view) {
   const gender = (assetImgs.roleGender && assetImgs.roleGender[name]) || inferGender(r.role_desc || '');
   const prompt = roleViewPrompt(r, gender, view);
   assetPrompts.role[name] = assetPrompts.role[name] || defaultRolePrompt(r, gender);
-  const fn = await genAsset('role', `${name}_${view}`, prompt, '锚点', {view});
+  // 非正面视图自动用正面锚点图做身份参考
+  const frontRef = (assetImgs.roleViews && assetImgs.roleViews[name] && assetImgs.roleViews[name].front)
+    || assetImgs.role[name] || '';
+  const refs = view !== 'front' && frontRef ? [frontRef] : [];
+  const fn = await genAsset('role', `${name}_${view}`, prompt, '锚点', {view, refs});
   assetImgs.roleViews = assetImgs.roleViews || {};
   assetImgs.roleViews[name] = assetImgs.roleViews[name] || {};
   assetImgs.roleViews[name][view] = fn;
@@ -3110,8 +3976,10 @@ document.querySelectorAll('#modalBg .tab-btn').forEach(btn => {
   });
 });
 $('btnRewrite').addEventListener('click', rewriteScript);
+$('btnReRewrite').addEventListener('click', reRewriteScript);
 $('btnConfirmScript').addEventListener('click', confirmScript);
 $('btnBuildPrompts').addEventListener('click', buildPrompts);
+$('btnClearPrompts').addEventListener('click', clearPrompts);
 $('btnSubmit').addEventListener('click', submit);
 $('btnRefreshStatus').addEventListener('click', refreshStatus);
 $('btnApplyMp').addEventListener('click', applyMpAll);
@@ -3134,6 +4002,12 @@ $('ruleSelect').addEventListener('change', e => {
   showRule(cur);
 });
 $('ruleModalBg').addEventListener('click', e => { if (e.target === $('ruleModalBg')) $('ruleModalBg').style.display = 'none'; });
+$('scoreModalClose').addEventListener('click', () => $('scoreModalBg').style.display = 'none');
+$('scoreModalBg').addEventListener('click', e => { if (e.target === $('scoreModalBg')) $('scoreModalBg').style.display = 'none'; });
+$('btnBatchEditPrompts').addEventListener('click', openBatchEditModal);
+$('batchEditCancel').addEventListener('click', () => $('batchEditModalBg').style.display = 'none');
+$('batchEditOk').addEventListener('click', doBatchEdit);
+$('batchEditModalBg').addEventListener('click', e => { if (e.target === $('batchEditModalBg')) $('batchEditModalBg').style.display = 'none'; });
 $('promptModalCancel').addEventListener('click', () => $('promptModalBg').style.display = 'none');
 $('promptModalOk').addEventListener('click', doPromptModify);
 $('promptModalBg').addEventListener('click', e => { if (e.target === $('promptModalBg')) $('promptModalBg').style.display = 'none'; });
@@ -3154,6 +4028,7 @@ $('qualityMode').addEventListener('change', () => {
 $('llmProvider').addEventListener('change', toggleCfgBoxes);
 $('imgProvider').addEventListener('change', toggleCfgBoxes);
 $('btnGenAllAssets').addEventListener('click', genAllAssets);
+$('btnRemakeAssets').addEventListener('click', remakeAssets);
 $('btnReverifyAssets').addEventListener('click', reverifyAssets);
 $('btnClearAssets').addEventListener('click', clearAssets);
 $('btnUploadVideo').addEventListener('click', () => $('videoUpload').click());
@@ -3162,6 +4037,28 @@ $('videoUpload').addEventListener('change', e => {
   e.target.value = '';
 });
 bindAssetStateEvents();
+$('storyAssets').addEventListener('input', e => {
+  const el = e.target;
+  if (el.classList && el.classList.contains('shot-prompt')) {
+    const seg = el.dataset.seg, shot = el.dataset.shot;
+    if (seg == null || shot == null) return;
+    assetPrompts.storyShots = assetPrompts.storyShots || {};
+    assetPrompts.storyShots[seg] = assetPrompts.storyShots[seg] || {};
+    assetPrompts.storyShots[seg][shot] = el.value;
+    autoSaveProject(true);
+  }
+});
+document.addEventListener('input', e => {
+  // 角色/场景提示词可编辑并即时保存（之前只存分镜，角色/场景改完不落库）
+  const el = e.target;
+  if (el.classList && el.classList.contains('asset-prompt')) {
+    const kind = el.dataset.kind, key = el.dataset.key;
+    if (!kind || key == null) return;
+    assetPrompts[kind] = assetPrompts[kind] || {};
+    assetPrompts[kind][key] = el.value;
+    autoSaveProject(true);
+  }
+});
 $('scriptTableWrap').addEventListener('input', () => {
   const s = collectScriptFromTable();
   if (s) { currentScript = s; scriptBefore = s; autoSaveProject(true); }
@@ -3175,7 +4072,10 @@ $('promptCards').addEventListener('input', e => {
 
 renderSteps();
 loadImages();
-loadProject();
+loadProject().then(async () => {
+  await Promise.all([ensureRefLinkTpl(), ensureAssetTpl()]);
+  goStep(resumeStep || 1);
+});
 renderProjects();
 loadAssembleHistory();
 checkConn();
@@ -3183,7 +4083,19 @@ checkLlm();
 loadConfigIntoForm();
 resumeExpand();
 resumeAssets();
-goStep(1);
+</script>
+<div id="zoomBg" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.88);z-index:9999;align-items:center;justify-content:center;cursor:zoom-out" onclick="closeZoom()">
+  <img id="zoomImg" style="max-width:92vw;max-height:92vh;border-radius:8px;box-shadow:0 8px 40px rgba(0,0,0,.5)">
+</div>
+<script>
+function zoomImg(src) {
+  $('zoomImg').src = src;
+  $('zoomBg').style.display = 'flex';
+}
+function closeZoom() {
+  $('zoomBg').style.display = 'none';
+  $('zoomImg').src = '';
+}
 </script>
 </body>
 </html>

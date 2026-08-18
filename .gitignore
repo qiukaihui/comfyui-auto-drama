@@ -26,6 +26,7 @@ _private/
 录屏素材/
 对比素材/
 comfyui_backup/
+发布视频/
 *.mp4
 *.mov
 *.wav

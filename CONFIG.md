@@ -63,7 +63,7 @@
 | `comfyui.steps` | 采样步数（20=质量 / 12=速度） | `20` |
 | `comfyui.target_mode` | 生成帧数档位：`direct_1_frame` / `micro_video_5_frames` / `short_video_22_frames` | `micro_video_5_frames` |
 | `comfyui.reference_strength` | 参考编辑模式强度（0-1，高=贴参考图） | `0.75` |
-| `comfyui.t2i_reference_strength` | 纯文生图模式参考强度（低=忽略占位图） | `0.2` |
+| `comfyui.t2i_unet` | FL2VA 纯文生图权重（无参考图时走核心 T2V 节点，无需占位图） | `minimax_h3_fl2va_pruned_int8_convrot.safetensors` |
 | `comfyui.story_mode` | 分镜图模式：`refedit`（场景+角色参考）/ `t2i`（纯文字） | `refedit` |
 | `comfyui.timeout` | 单张生成超时（秒） | `900` |
 

@@ -41,7 +41,7 @@ if [ "$SKIP_MODELS" -eq 0 ]; then
   command -v huggingface-cli >/dev/null || python3 -m pip install --quiet "huggingface_hub[hf_xet]"
   mkdir -p "$MODEL_DIR"
   huggingface-cli download --local-dir "$MODEL_DIR/Boogu-Image-0.1-Turbo-8bit" mlx-community/Boogu-Image-0.1-Turbo-8bit
-  huggingface-cli download --local-dir "$MODEL_DIR/Qwen3-VL-8B-Instruct-4bit" mlx-community/Qwen3-VL-8B-Instruct-4bit
+  HF_ENDPOINT=https://hf-mirror.com huggingface-cli download --local-dir "$MODEL_DIR/Qwen3-VL-8B-Instruct-abliterated-v2-MLX-4bit" LethalDonkey/Qwen3-VL-8B-Instruct-abliterated-v2-MLX-4bit
 else
   echo "==> 4/4 跳过模型下载（--skip-models）"
 fi
@@ -49,7 +49,7 @@ fi
 echo ""
 echo "部署完成。启动服务："
 echo "  BOOGU_MODEL=$MODEL_DIR/Boogu-Image-0.1-Turbo-8bit \\"
-echo "  BOOGU_QWEN=$MODEL_DIR/Qwen3-VL-8B-Instruct-4bit \\"
+echo "  BOOGU_QWEN=$MODEL_DIR/Qwen3-VL-8B-Instruct-abliterated-v2-MLX-4bit \\"
 echo "  python3 scripts/boogu_server.py"
 echo ""
 echo "验证：curl http://127.0.0.1:8081/v1/models"

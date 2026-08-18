@@ -43,7 +43,7 @@
       "steps": 20,
       "target_mode": "micro_video_5_frames",
       "reference_strength": 0.75,
-      "t2i_reference_strength": 0.2,
+      "t2i_unet": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
       "story_mode": "refedit",
       "timeout": 900
     }

@@ -228,12 +228,12 @@ python3 batch_console.py 8890
 ```bash
 bash scripts/deploy_boogu.sh          # 装依赖 + 克隆管线 + 下载模型 + 准备服务
 BOOGU_MODEL=~/.boogu/models/Boogu-Image-0.1-Turbo-8bit \
-BOOGU_QWEN=~/.boogu/models/Qwen3-VL-8B-Instruct-4bit \
+BOOGU_QWEN=~/.boogu/models/Qwen3-VL-8B-Instruct-abliterated-v2-MLX-4bit \
 python3 scripts/boogu_server.py       # 启动（默认 8081）
 ```
 
 - 依赖：`mlx` / `mlx-vlm` / `fastapi` / `uvicorn` / `pillow`，管线来自 [xocialize/boogu-image-mlx](https://github.com/xocialize/boogu-image-mlx)
-- 模型：`mlx-community/Boogu-Image-0.1-Turbo-8bit`（约 10GB）+ `Qwen3-VL-8B-Instruct-4bit`（prompt 理解辅助）
+- 模型：`mlx-community/Boogu-Image-0.1-Turbo-8bit`（约 10GB）+ `LethalDonkey/Qwen3-VL-8B-Instruct-abliterated-v2-MLX-4bit`（prompt 理解辅助，未审查）
 - 非 Apple Silicon 无法本地跑 → 直接切**云端生图**（见下）
 
 ### 云端模型切换（LLM / 文生图）
