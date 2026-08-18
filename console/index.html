@@ -832,7 +832,7 @@ function goStep(n) {
     if (scriptBefore) renderScriptCompare(scriptBefore, 'beforeScript');
     if (scriptAfter) renderScriptCompare(scriptAfter, 'afterScript');
   }
-  if (n === 5) { renderAssets(); checkBoogu(); loadMedia(); }
+  if (n === 5) { syncRoleAppearance().then(() => { renderAssets(); checkBoogu(); loadMedia(); }); }
   if (n === 4) renderPromptCards();
   window.scrollTo({top: 0, behavior: 'smooth'});
   if (n >= 2 && n <= 8) saveLastStep(n);
@@ -1603,6 +1603,7 @@ function pollExpandTask(tid) {
         if (pd.status === 'done') {
           promptTasks = pd.tasks || [];
           renderPromptCards();
+          syncRoleAppearance(); // 扩写完成：同步角色最新形象到资产状态（供第 5 步使用）
           const failedNums = pd.failed || [];
           $('promptHint').textContent = failedNums.length
             ? `⚠️ 已生成 ${promptTasks.length} 段，${failedNums.length} 段 AI 扩写失败已留空（第 ${failedNums.join('、')} 段），请对失败段点「✨ 重新扩写」重试`
@@ -2609,6 +2610,7 @@ function storyRefLinkBlock(i, customRef) {
   }
   let roles = s.roles || [];
   if (typeof roles === 'string') roles = [roles];
+  roles = roles.filter(rn => !isVoiceOnlyRole({role_name: rn}));
   roles.forEach(n => {
     const vw = (assetImgs.roleViews && assetImgs.roleViews[n]) || {};
     const front = vw.front || (assetImgs.role && assetImgs.role[n]) || '';
@@ -2713,13 +2715,41 @@ async function switchImgGenMode(provider) {
   } catch (e) { toast('切换失败：' + e.message, true); checkBoogu(); }
 }
 
+function isVoiceOnlyRole(r) {
+  // 画外音/旁白角色：只出现声音，不出现在画面，不需要锚点图、不占画面人数
+  const name = String(r.role_name || r.name || '');
+  const desc = String(r.role_desc || '');
+  return /画外音|旁白|只闻其声|仅声音|只出现声音|不出镜/.test(name + desc);
+}
+
+async function syncRoleAppearance() {
+  // 把第 4 步规范提示词的 STRICT 行同步为角色最新形象（appearance），供第 5 步使用
+  try {
+    const r = await fetch('/api/sync_role_appearance', {
+      method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}',
+    });
+    const d = await r.json();
+    if (r.ok && d.changed && d.roles) {
+      assetState.roles = assetState.roles || {};
+      Object.entries(d.roles).forEach(([n, desc]) => {
+        assetState.roles[n] = assetState.roles[n] || {};
+        assetState.roles[n].appearance = desc;
+      });
+      return true;
+    }
+  } catch (e) { /* 同步失败不影响页面 */ }
+  return false;
+}
+
 function renderAssets() {
   // 模板规则未加载时先加载，再渲染（避免用代码兜底文本渲染一遍）
   if (!assetTpl) { ensureAssetTpl().then(() => renderAssets()); return; }
   renderAssetState();
-  const roles = (currentScript && currentScript.role_list) || [];
+  // 画外音/旁白角色不出现在画面，不生成锚点图卡片
+  const roles = ((currentScript && currentScript.role_list) || []).filter(r => !isVoiceOnlyRole(r));
   $('roleAssets').innerHTML = roles.map((r, i) => {
     const name = r.role_name || r.name || '角色' + (i + 1);
+    const stx = (assetState.roles && assetState.roles[name]) || {};
     const views = ((assetImgs.roleViews && assetImgs.roleViews[name]) || {});
     const pv = rolePreview[name] || 'front';
     const img = views[pv] || views.front || assetImgs.role[name] || '';
@@ -2743,7 +2773,7 @@ function renderAssets() {
       <div class="r1"><span class="name">${esc(name)}</span>${verifyBadge('role', name)}
         <select class="g-sel" onchange="setRoleGender(${i}, this.value)" style="width:70px;font-size:12px;padding:4px">${genderOpts}</select>
       </div>
-      <div class="meta">${esc(r.role_desc || '')}</div>
+      <div class="meta">${esc(stx.appearance || r.role_desc || '')}</div>
       <img class="role-main-img" data-name="${esc(name)}" src="${img ? '/media/' + encodeURIComponent(img) : ''}" onclick="${img ? `zoomImg('/media/${encodeURIComponent(img)}')` : ''}" style="width:100%;aspect-ratio:3/4;object-fit:cover;border-radius:8px;border:1px solid var(--line);background:#f1f4f9;display:${img ? 'block':'none'}${img ? ';cursor:zoom-in' : ''}">
       <div style="display:flex;gap:4px;margin-top:6px">${viewGrid}</div>
       <div style="display:flex;gap:4px;align-items:center;margin-top:6px">
@@ -2956,7 +2986,8 @@ async function genAsset(kind, key, prompt, label, opts) {
   } else if (kind === 'story') {
     const idx = typeof key === 'number' ? key : parseInt(key, 10);
     const roles = ((currentScript.storyboard_list || [])[idx] || {}).roles || [];
-    expected = {look: prompt.slice(0, 160), people_count: Math.max(roles.length, 1)};
+    const visible = roles.filter(rn => !isVoiceOnlyRole({role_name: rn}));
+    expected = {look: prompt.slice(0, 160), people_count: Math.max(visible.length, 1)};
   }
   // 质检与本次实际提示词对应：质检模型直接对着提示词检查要求
   expected.prompt = prompt;
@@ -2977,8 +3008,9 @@ function defaultRolePrompt(r, gender) {
   const genderZh = {女: '年轻女性', 男: '年轻男性', 未知: ''}[gender] || '';
   const genderEn = {女: 'a young Chinese woman', 男: 'a young Chinese man', 未知: ''}[gender] || '';
   const name = r.role_name || r.name || '';
-  const desc = r.role_desc || '';
   const st = (assetState.roles && assetState.roles[name]) || {};
+  // 形象优先级：第 4 步规范提示词同步的最新形象（appearance）→ 剧本角色描述
+  const desc = st.appearance || r.role_desc || '';
   const look = [st.hair, st.costume].filter(Boolean).join('，');
   const gText = genderZh || '根据名字与描述判断性别';
   const gEn = genderEn || 'gender according to the description';
@@ -3161,12 +3193,13 @@ async function fillStoryShotPrompt(i, sn) {
   if (saved) return saved;
   const h3 = h3PromptOf(i);
   if (sn === 1 && $('storyAiPrompt') && $('storyAiPrompt').checked && h3) {
-    const sb = (currentScript.storyboard_list || [])[i] || {};
+    const sb = Object.assign({}, (currentScript.storyboard_list || [])[i] || {});
+    sb.roles = (sb.roles || []).filter(rn => !isVoiceOnlyRole({role_name: rn}));
     const roles = ((currentScript.role_list || [])).map(r => ({
       name: r.role_name || r.name,
       desc: r.role_desc || '',
       anchor_prompt: assetPrompts.role[r.role_name || r.name] || '',
-    }));
+    })).filter(r => !isVoiceOnlyRole(r));
     try {
       const r = await fetch('/api/story_prompt', {
         method: 'POST', headers: {'Content-Type':'application/json'},
@@ -3291,7 +3324,7 @@ function roleViewPrompt(r, gender, view) {
   const enIdx = ap.search(/[A-Za-z]{3,}/);
   if (enIdx > 0) identity = ap.slice(0, enIdx);
   identity = identity.replace(/半身肖像照/g, '').replace(/真实人物照片风格/g, '').replace(/简洁干净背景/g, '').trim();
-  if (!identity) identity = `${gText}，${r.role_desc || '人物'}${eraPhrase}`;
+  if (!identity) identity = `${gText}，${st.appearance || r.role_desc || '人物'}${eraPhrase}`;
   const same = `同一人物「${name}」，身份${st.identity || '与锚点提示词相同'}、发型${st.hair || '一致'}、服装${st.costume || '一致'}，与锚点提示词完全一致，不得改变五官、发型与服装`;
   const neg = `单一人像，无其他人物，无多余肢体/手指，无重复人物，无文字乱码${eraPhrase}，胶片质感，写实摄影`;
   const vt = {face: '角色-脸部', side: '角色-侧面', back: '角色-背面'}[view];
@@ -3394,12 +3427,13 @@ async function genStoryImg(i, shotIdx) {
     // 拍1：AI 按剧情生成规范提示词（仅当没有手动内容和已保存提示词；AI 慢/失败自动回退规则模板）
     if (shotIdx === 1 && $('storyAiPrompt').checked && !(ta && ta.value.trim()) && !saved) {
       toastLoading(`🤖 AI 正在按剧情生成分镜 ${i + 1} 提示词（约 20-40 秒）…`);
-      const sb = (currentScript.storyboard_list || [])[i] || {};
+      const sb = Object.assign({}, (currentScript.storyboard_list || [])[i] || {});
+      sb.roles = (sb.roles || []).filter(rn => !isVoiceOnlyRole({role_name: rn}));
       const roles = ((currentScript.role_list || [])).map(r => ({
         name: r.role_name || r.name,
         desc: r.role_desc || '',
         anchor_prompt: assetPrompts.role[r.role_name || r.name] || '',
-      }));
+      })).filter(r => !isVoiceOnlyRole(r));
       try {
         const r = await fetch('/api/story_prompt', {
           method: 'POST', headers: {'Content-Type':'application/json'},
@@ -3599,6 +3633,7 @@ async function genAllAssets() {
   const pushItem = (kind, key, prompt, view, expected, label, shot, refs) => items.push({kind, key, shot, prompt, view, expected, label, refs});
   let aiFill = 0;
   roles.forEach((r, i) => {
+    if (isVoiceOnlyRole(r)) return; // 画外音角色不生成锚点图
     const name = r.role_name || r.name;
     ['front', 'face', 'side', 'back'].forEach(v => {
       if (!fourViews && v !== 'front') return;
@@ -3643,7 +3678,8 @@ async function genAllAssets() {
       let prompt = await fillStoryShotPrompt(i, sn);
       const ref = ((assetState.storyShots && assetState.storyShots[i] && assetState.storyShots[i][sn]) || {}).gen_ref || '';
       prompt = attachStoryRefBlock(prompt, i, ref);
-      pushItem('story', i, prompt, null, {look: prompt.slice(0, 160), people_count: Math.max((s.roles || []).length, 1), prompt}, `分镜 ${i + 1} 拍${sn}`, sn, ref ? [ref] : []);
+      const visible = (s.roles || []).filter(rn => !isVoiceOnlyRole({role_name: rn}));
+      pushItem('story', i, prompt, null, {look: prompt.slice(0, 160), people_count: Math.max(visible.length, 1), prompt}, `分镜 ${i + 1} 拍${sn}`, sn, ref ? [ref] : []);
     }
   }
   const total = items.length;
@@ -3686,9 +3722,10 @@ async function genStoryboards() {
       const prompt = await fillStoryShotPrompt(i, sn);
       const ref = ((assetState.storyShots && assetState.storyShots[i] && assetState.storyShots[i][sn]) || {}).gen_ref || '';
       const p = attachStoryRefBlock(prompt, i, ref);
+      const visible = (s.roles || []).filter(rn => !isVoiceOnlyRole({role_name: rn}));
       items.push({
         kind: 'story', key: i, shot: sn, prompt: p, view: null,
-        expected: {look: p.slice(0, 160), people_count: Math.max((s.roles || []).length, 1), prompt: p},
+        expected: {look: p.slice(0, 160), people_count: Math.max(visible.length, 1), prompt: p},
         label: `分镜 ${i + 1} 拍${sn}`, refs: ref ? [ref] : [],
       });
     }

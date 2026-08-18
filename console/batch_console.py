@@ -4168,6 +4168,48 @@ def _asset_state_block():
     )
 
 
+def _sync_role_appearance_from_prompts(proj):
+    """从第 4 步 H3 规范提示词的 STRICT 行提取每个角色的最新形象（“上一步”内容），
+    写入 asset_state.roles[name].appearance，供第 5 步锚点提示词与状态表使用。
+    身份与状态分开：只取第一段（初始状态）的基础形象，不把后段的伤势/汗湿/凌乱等
+    状态变化混进锚点形象。
+    返回 (是否变更, {角色名: 形象})。"""
+    pt = proj.get("prompt_tasks") or []
+    ast = dict(proj.get("asset_state") or {})
+    roles = dict(ast.get("roles") or {})
+    app = {}
+    pat = re.compile(
+        r"([\u4e00-\u9fa5A-Za-z0-9（()）·\s]{1,14})\s*=\s*ONLY\s+([^\n;；]+)"
+    )
+    for t in pt:
+        p = str(t.get("prompt") or "")
+        for m in pat.finditer(p):
+            name = m.group(1).strip()
+            desc = m.group(2).strip().rstrip("。.")
+            # 去掉同句尾部的画外音说明（“父亲、母亲不出现在画面中，仅存在声音”等）
+            segs = []
+            for sg in re.split(r"[。]", desc):
+                if any(k in sg for k in
+                       ("不出现在画面", "不在画面", "仅存在声音", "只闻其声", "画外音",
+                        "不出镜", "画面中恰好", "画面中只有", "画面中严格", "画面内严格",
+                        "无其他人物", "无第三人", "无多余人物", "不计画外音")):
+                    break
+                segs.append(sg)
+            desc = "。".join(segs).strip()
+            if name and desc and len(desc) > 3 and name not in app:
+                app[name] = desc  # 第一段优先（初始基础形象），后续状态变化不覆盖
+    changed = False
+    for n, d in app.items():
+        roles.setdefault(n, {})
+        if str(roles[n].get("appearance") or "").strip() != d:
+            roles[n]["appearance"] = d
+            changed = True
+    if changed:
+        ast["roles"] = roles
+        proj["asset_state"] = ast
+    return changed, app
+
+
 _VIEW_ZH = {"front": "正面", "face": "脸部特写", "side": "侧面", "back": "背面"}
 
 
@@ -4514,6 +4556,12 @@ def _save_expand_progress(rows, tid, final=False):
         proj = dict(st.get("project") or {})
         proj["prompt_tasks"] = rows
         proj["prompt_updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        if final:
+            # 扩写完成：把角色最新形象（STRICT 行）同步进资产状态，供第 5 步锚点提示词使用
+            try:
+                _sync_role_appearance_from_prompts(proj)
+            except Exception:
+                pass
         st["project"] = proj
         projects = st.get("projects") or {}
         if proj.get("name"):
@@ -6028,6 +6076,25 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, json.dumps({"prompts": out}, ensure_ascii=False))
             except Exception as e:
                 self._send(400, json.dumps({"error": f"批量修改失败：{e}"}, ensure_ascii=False))
+            return
+        if path == "/api/sync_role_appearance":
+            """把第 4 步规范提示词的 STRICT 行同步为角色最新形象（appearance）。"""
+            try:
+                st = load_state()
+                proj = dict(st.get("project") or {})
+                changed, app = _sync_role_appearance_from_prompts(proj)
+                if changed:
+                    st["project"] = proj
+                    projects = st.get("projects") or {}
+                    if proj.get("name"):
+                        snap = dict(proj)
+                        snap["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                        projects[proj["name"]] = snap
+                        st["projects"] = projects
+                    save_state(st)
+                self._send(200, json.dumps({"changed": changed, "roles": app}, ensure_ascii=False))
+            except Exception as e:
+                self._send(400, json.dumps({"error": f"同步角色形象失败：{e}"}, ensure_ascii=False))
             return
         if path == "/api/assemble":
             project_name = body.get("project_name", "")
