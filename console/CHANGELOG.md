@@ -5,6 +5,33 @@
 
 ---
 
+## 2026-08-24 · v0.14.12 — 视觉质检切换到 LM Studio 模型 ornith-1.5-35b-a3b-crack@q4_k_m
+
+### 本次更新内容
+
+- config.json `vision` 段改为：
+  - base_url = http://127.0.0.1:1234/v1（LM Studio）
+  - model = ornith-1.5-35b-a3b-crack@q4_k_m（已验证支持图片输入，视觉质检/参考图一致性检查用它）
+  - api_key = LM Studio token（复用 llm.local.token，不新增明文）
+- 原 config.json 备份为 config.json.bak_vision
+
+### 验证方式
+
+- 该模型对图片请求实测返回正确场景描述（雨夜老街）
+- 控制台 8890 正常，/api/rules 返回 29 条
+
+### 影响与注意事项
+
+- 重启服务后生效；视觉质检走 LM Studio，不再依赖 8001 视觉服务
+- 注意：qwen3.8-27b-heretic-abliterated-uncensored 不支持图片输入，
+  文本扩写仍用它，视觉质检用 ornith-1.5-35b-a3b-crack@q4_k_m
+
+### 失败码 / 错误提示变化
+
+- 无
+
+---
+
 ## 2026-08-18 · v0.14.11 — 分镜每拍新增「重新生成提示词」按钮（严格按第 4 步规范提示词）+ 分镜4 提示词与图片重做
 
 ### 本次更新内容
