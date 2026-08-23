@@ -1800,7 +1800,8 @@ function renderStatusCards() {
       const outs = (t.outputs || []).map(o => {
         const isVideo = /\.(mp4|webm|mov)$/i.test(o.filename || '');
         const vid = (isVideo && t.downloaded)
-        ? `<video src="/media/${encodeURIComponent(o.filename)}" controls preload="none" style="width:100%;border-radius:8px;margin-top:6px;background:#000"></video>`
+        ? `<video src="/media/${encodeURIComponent(o.filename)}" controls preload="none" style="width:100%;border-radius:8px;margin-top:6px;background:#000"></video>
+           <div style="margin-top:4px"><a href="/media/${encodeURIComponent(o.filename)}" target="_blank" rel="noopener" style="color:var(--blue);font-size:12px">↗ 新窗口打开（内嵌播放器限 3 秒时用）</a></div>`
           : '';
         const dl = (isVideo && !t.downloaded)
           ? ` <a href="/media/${encodeURIComponent(o.filename)}" download style="color:var(--blue)">下载预览</a>`
@@ -1951,7 +1952,8 @@ async function assemble() {
           $('assembleResult').innerHTML = `
             <video src="/media/${encodeURIComponent(pd.filename)}" controls preload="none" style="width:100%;max-height:480px;border-radius:10px;background:#000"></video>
             <div class="hint" style="margin-top:8px">✅ ${esc(pd.filename)}
-              <a href="/media/${encodeURIComponent(pd.filename)}" download style="color:var(--blue)">下载</a></div>`;
+              <a href="/media/${encodeURIComponent(pd.filename)}" download style="color:var(--blue)">下载</a>
+              <a href="/media/${encodeURIComponent(pd.filename)}" target="_blank" rel="noopener" style="color:var(--blue)">↗ 新窗口打开</a></div>`;
           toast('🎬 合成完成');
         } else if (pd.status === 'error') {
           clearInterval(poll);
@@ -2071,6 +2073,7 @@ function renderAssembleHistory() {
             <video src="/media/${encodeURIComponent(f.filename)}" controls preload="none" style="width:100%;border-radius:8px;max-height:220px;background:#000"></video>
             <div class="row" style="margin-top:6px">
               <a href="/media/${encodeURIComponent(f.filename)}" download style="color:var(--blue);font-size:12px">⬇️ 下载</a>
+              <a href="/media/${encodeURIComponent(f.filename)}" target="_blank" rel="noopener" style="color:var(--blue);font-size:12px">↗ 新窗口打开</a>
               <label style="font-size:11px;color:var(--muted);display:flex;align-items:center;gap:3px">
                 <input type="checkbox" data-hsel="${escAttr(f.filename)}" ${histSelected[f.filename] ? 'checked' : ''}
                   onchange="histSelected[this.dataset.hsel]=this.checked;renderAssembleHistory()"> 合并
