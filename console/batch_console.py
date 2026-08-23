@@ -3187,6 +3187,21 @@ def _chat_once(endpoint, messages, token="", timeout=1800, max_tokens=None):
     return fn(endpoint, messages, token, timeout, max_tokens)
 
 
+def _lm_model_loaded(base_url, api_key, model):
+    """只读检查模型是否已加载（/v1/models 不触发加载）。检查失败返回 False。"""
+    try:
+        req = urllib.request.Request(
+            str(base_url).rstrip("/") + "/models",
+            headers=_lm_headers(str(api_key or "")),
+        )
+        with _opener().open(req, timeout=5) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        ids = [str(m.get("id") or m.get("name") or "") for m in data.get("data", [])]
+        return str(model or "") in ids
+    except Exception:
+        return False
+
+
 def check_lmstudio(token="", timeout=6):
     main, backup = _llm_endpoints()
     for ep in [main, backup]:
@@ -3691,6 +3706,12 @@ def vision_ask(image_path, prompt, refs=None, timeout=120):
     base = cfg.get("DASHSCOPE_BASE_URL", "http://127.0.0.1:8001/v1")
     model = cfg.get("VISION_MODEL", "Qwen3.6-35B-A3B-8bit")
     key = cfg.get("DASHSCOPE_API_KEY", "")
+    # 视觉走 LM Studio 时：先只读检查模型已加载，未加载不调用（不触发自动加载）
+    if str(base or "") and ("1234" in str(base) or "lmstudio" in str(base).lower()):
+        if not _lm_model_loaded(base, key, model):
+            raise RuntimeError(
+                f"视觉模型 {model} 未加载：不自动加载，请先在 LM Studio 中加载该模型再重试"
+            )
 
     def _img_item(p):
         with open(p, "rb") as f:
@@ -4694,6 +4715,14 @@ def lmstudio_chat(messages, token="", timeout=1800, max_tokens=None):
         if not ep or not ep.get("url"):
             continue
         try:
+            # 本地 LM Studio：先只读检查目标模型已加载，未加载不调用（不触发自动加载）
+            if str(ep.get("provider") or "").strip() == "local":
+                model = _lm_model()
+                api_key = str(token or "").strip() or ep.get("api_key") or ""
+                if not _lm_model_loaded(_v1(ep["url"]), api_key, model):
+                    raise RuntimeError(
+                        f"模型 {model} 未加载：不自动加载，请先在 LM Studio 中加载该模型再重试"
+                    )
             return _chat_once(ep, messages, token, timeout, max_tokens)
         except Exception as e:
             last_err = e

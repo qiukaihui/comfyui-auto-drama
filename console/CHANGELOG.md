@@ -5,6 +5,39 @@
 
 ---
 
+## 2026-08-24 · v0.14.13 — 文本/扩写与视觉统一使用 ornith-1.5-35b-a3b-crack@q4_k_m + 未加载不调用守卫
+
+### 本次更新内容
+
+- **文本/扩写模型切换**：config.json `llm.local.model` 与 console.db `lmstudio_model`
+  覆盖值均改为 `ornith-1.5-35b-a3b-crack@q4_k_m`（剧本/改写/扩写/润色/分镜提示词/
+  批量修改/评分全部走它）
+- **视觉模型**：config.json `vision` 使用同模型（上一条已切）
+- **新增“未加载不调用”守卫**：
+  - `_lm_model_loaded()`：只读调用 /v1/models 检查目标模型是否已加载（不触发加载）
+  - `lmstudio_chat`：本地端点调用前检查，模型未加载直接报错
+    「模型 X 未加载：不自动加载，请先在 LM Studio 中加载该模型再重试」，不触发自动加载
+  - `vision_ask`：视觉走 LM Studio 时同样先检查再调用
+- 配置文件备份：config.json.bak_llm / config.json.bak_vision
+
+### 验证方式
+
+- py_compile 通过；服务重启后 web 8890 正常
+- check_lmstudio：available=True（ornith q4_k_m 已加载）
+- _lm_model_loaded(ornith q4_k_m) = True
+
+### 影响与注意事项
+
+- 扩写/质检都使用 ornith-1.5-35b-a3b-crack@q4_k_m；如需换模型，
+  改 config.json `llm.local.model` + `vision.model` 并重启
+- 若目标模型未加载，系统不再自动加载，会明确报错提示手动加载
+
+### 失败码 / 错误提示变化
+
+- 新增提示：模型未加载时返回「模型 X 未加载：不自动加载，请先在 LM Studio 中加载该模型再重试」
+
+---
+
 ## 2026-08-24 · v0.14.12 — 视觉质检切换到 LM Studio 模型 ornith-1.5-35b-a3b-crack@q4_k_m
 
 ### 本次更新内容
