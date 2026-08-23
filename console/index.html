@@ -3787,6 +3787,22 @@ async function genStoryboards() {
 let assetsGenRunning = false;  // 服务端批量生图任务是否在跑（用于忙碌拦截/刷新恢复）
 let assetsPoll = null;          // 批量生图进度轮询句柄（清空图片时需停止）
 
+async function syncAssetsFromServer() {
+  // 从服务端拉取最新资产（批量生图是后台跑，图只存服务端；不刷新页面也能同步显示）
+  try {
+    const r = await fetch('/api/project', {
+      method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}',
+    });
+    const d = await r.json();
+    const p = d.project || {};
+    if (p.asset_imgs) assetImgs = p.asset_imgs;
+    if (p.asset_state) assetState = p.asset_state;
+    if (p.asset_meta) assetMeta = p.asset_meta;
+    if (p.asset_prompts) assetPrompts = p.asset_prompts;
+    return true;
+  } catch (e) { return false; }
+}
+
 function pollAssetsTask(tid) {
   assetsGenRunning = true;
   $('assetProgress').style.display = '';
@@ -3804,6 +3820,12 @@ function pollAssetsTask(tid) {
         $('assetBar').style.width = `${Math.round(done / total * 100)}%`;
         const fails = (d.failed || []).map(f => f.label).join('、');
         $('assetProgressText').textContent = `已生成 ${done}/${total} 张 · ${d.current || ''}${fails ? ` · 失败：${fails}` : ''}`;
+        // 实时同步服务端已生成的图：不用刷新页面就能看到（有变化才重渲染，避免打断编辑）
+        try {
+          const before = JSON.stringify(assetImgs);
+          await syncAssetsFromServer();
+          if (JSON.stringify(assetImgs) !== before) renderAssets();
+        } catch (e2) {}
       } else {
         clearInterval(assetsPoll); assetsPoll = null;
         assetsGenRunning = false;
@@ -3835,9 +3857,11 @@ function pollAssetsTask(tid) {
 
 function stopAssetsNow() {
   if (!assetsGenRunning && !assetsPoll) { toast('当前没有生成任务', true); return; }
-  cancelAssetsTask();
-  toast('⏹ 已停止批量生图，可重新生成或清空');
-  renderAssets();
+  cancelAssetsTask().then(async () => {
+    await syncAssetsFromServer();  // 停止后把已生成的图同步到页面（不用刷新）
+    renderAssets();
+    toast('⏹ 已停止批量生图，已生成部分已同步显示；可重新生成或清空');
+  });
 }
 
 async function cancelAssetsTask() {
