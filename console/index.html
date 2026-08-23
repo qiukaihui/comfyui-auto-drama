@@ -3016,6 +3016,11 @@ async function genAsset(kind, key, prompt, label, opts) {
 function defaultRolePrompt(r, gender) {
   const genderZh = {女: '年轻女性', 男: '年轻男性', 未知: ''}[gender] || '';
   const genderEn = {女: 'a young Chinese woman', 男: 'a young Chinese man', 未知: ''}[gender] || '';
+  const genderLock = gender === '男'
+    ? '；男性体征明确：短发、平胸无乳房、喉结、宽肩窄胯、肌肉线条清晰；非女性，无长发、无乳房、无妆容'
+    : gender === '女'
+      ? '；女性体征明确：面部柔和、乳房自然、腰臀曲线、发型柔顺；非男性，无胡须、无喉结突出'
+      : '';
   const name = r.role_name || r.name || '';
   const st = (assetState.roles && assetState.roles[name]) || {};
   // 形象优先级：第 4 步规范提示词同步的最新形象（appearance）→ 剧本角色描述
@@ -3028,8 +3033,8 @@ function defaultRolePrompt(r, gender) {
   const genRef = ((assetState.roles && assetState.roles[name]) || {}).gen_ref || '';
   const t = (assetTpl || {})['角色-正面'];
   const prompt = t
-    ? tplFill(t, {GENDER_ZH: gZhHead(gText), DESC: desc || '人物', LOOK: lookText, ERA: eraPhrase, GENDER_EN: gEn})
-    : `${gZhHead(gText)}，${desc || '人物'}${lookText}${eraPhrase}。${gEn}，半身肖像照，真实人物照片风格，自然光，简洁干净背景，面部清晰，双眼有神，胶片质感，写实摄影，单一人像，画面内无文字、无其他人物、无多余肢体`;
+    ? tplFill(t, {GENDER_ZH: gZhHead(gText), DESC: desc || '人物', LOOK: lookText, ERA: eraPhrase, GENDER_EN: gEn, GENDER_LOCK: genderLock})
+    : `${gZhHead(gText)}，${desc || '人物'}${lookText}${eraPhrase}${genderLock}。${gEn}，半身肖像照，真实人物照片风格，自然光，简洁干净背景，面部清晰，双眼有神，胶片质感，写实摄影，单一人像，画面内无文字、无其他人物、无多余肢体`;
   return attachRefLink(prompt, 'role', genRef);
 }
 function gZhHead(t) { return t; }
@@ -3341,6 +3346,12 @@ function roleViewPrompt(r, gender, view) {
   if (enIdx > 0) identity = ap.slice(0, enIdx);
   identity = identity.replace(/半身肖像照/g, '').replace(/真实人物照片风格/g, '').replace(/简洁干净背景/g, '').trim();
   if (!identity) identity = `${gText}，${st.appearance || r.role_desc || '人物'}${eraPhrase}`;
+  const genderLock = gender === '男'
+    ? '男性体征明确：短发、平胸无乳房、喉结、宽肩窄胯、肌肉线条清晰；非女性，无长发、无乳房、无妆容'
+    : gender === '女'
+      ? '女性体征明确：面部柔和、乳房自然、腰臀曲线、发型柔顺；非男性，无胡须、无喉结突出'
+      : '';
+  if (genderLock && identity.indexOf('体征明确') < 0) identity = `${identity}。${genderLock}`;
   const same = `同一人物「${name}」，身份${st.identity || '与锚点提示词相同'}、发型${st.hair || '一致'}、服装${st.costume || '一致'}，与锚点提示词完全一致，不得改变五官、发型与服装`;
   const neg = `单一人像，无其他人物，无多余肢体/手指，无重复人物，无文字乱码${eraPhrase}，胶片质感，写实摄影`;
   const vt = {face: '角色-脸部', side: '角色-侧面', back: '角色-背面'}[view];
