@@ -37,6 +37,17 @@
     color: var(--blue); border: 1px solid rgba(79,124,255,.25); font-weight: 600;
   }
   header .spacer { flex: 1; }
+  .official-site-link {
+    display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0;
+    padding: 8px 14px; border: 1px solid #c94d1d; border-radius: 8px;
+    background: #c94d1d; color: #fff; font-size: 14px; font-weight: 700;
+    text-decoration: none; white-space: nowrap;
+  }
+  .official-site-link:hover { background: #a93c12; border-color: #a93c12; }
+  .official-site-link:focus-visible { outline: 3px solid var(--blue); outline-offset: 3px; }
+  @media (max-width: 640px) {
+    header { flex-wrap: wrap; padding: 12px 16px; gap: 10px; }
+  }
   .icon-btn {
     background: var(--card); border: 1px solid var(--line); border-radius: 10px;
     padding: 9px 16px; font-size: 13px; cursor: pointer; color: var(--text);
@@ -235,6 +246,7 @@
 
 <header>
   <div class="brand">🎬 ComfyUI 短剧工坊<small>MiniMax H3 视频生成流水线</small></div>
+  <a class="official-site-link" href="https://kfchenzhan.com.cn/" target="_blank" rel="noopener noreferrer" aria-label="打开短剧工坊官网">官网 <span aria-hidden="true">↗</span></a>
   <span class="project-chip" id="projectChip">未创建项目</span>
   <div class="spacer"></div>
   <button class="icon-btn" id="btnSettings">⚙️ 设置</button>
